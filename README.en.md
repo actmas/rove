@@ -1,14 +1,12 @@
-# Rove · Local-First Multi-Agent AI Coding Workstation
+# Rove · Self-Hosted Vibe Coding Web UI for Desktop and Mobile
 
 [简体中文](./README.md) · **English**
 
-Control your host's AI coding tools from a desktop browser, phone, or tablet. Start a task on your computer, check its progress on your phone, answer agent questions, and continue the same conversation with another model or engine.
+Rove is an open-source, self-hosted AI coding Web UI for Codex, Antigravity, Claude Code, and other configured agents. Use it for browser-based and mobile vibe coding. Control your host's AI coding tools from a desktop browser, phone, or tablet. Start a task on your computer, check its progress on your phone, answer agent questions, and continue the same conversation with another model or engine.
 
 Rove runs a FastAPI control plane and React PWA on your workstation. Your repositories, runtime configuration, and local credentials are stored on the host. Requests to AI services follow the configuration of each engine.
 
 ## Screenshots from the running application
-
-Captured from a locally running Rove instance on November 15, 2026. The email address and project name were anonymized, and the session list was hidden. Quota values reflect the account state at capture time and vary by account, model, and time. The application UI shown here is in Chinese.
 
 ![Desktop workspace with project, engine, model, and reasoning controls](./docs/images/workspace-desktop.png)
 
@@ -87,6 +85,59 @@ Visit `http://127.0.0.1:8765`. To install a background service or change the pas
 ```
 
 Runtime data defaults to `~/.config/walking-workstation/`. Set `WORKSTATION_DATA` to use another directory. Configure project roots, allowed hosts, origins, and endpoint URLs using [config.example.json](./config.example.json) and [.env.example](./.env.example).
+
+## Remote access from your phone
+
+Start Rove locally and configure an access password, then choose a connection method.
+
+### Local network
+
+Bind to the LAN interface and allow trusted devices through the host firewall.
+
+```bash
+./.venv/bin/python -m uvicorn workstation.server:app --host 0.0.0.0 --port 8765
+```
+
+In the runtime `config.json`, add the host's LAN IP to `allowed_hosts`, add `http://IP:8765` to `origins`, and update `lan_url`. Preserve existing configuration fields. Open that address on a phone connected to the same network.
+
+### Cloudflare Tunnel and a custom domain
+
+Use a Cloudflare account, a domain on Cloudflare, and `cloudflared` installed on the host.
+
+1. Run Rove at `http://127.0.0.1:8765`.
+2. Create a Tunnel and configure its connector credentials locally using Cloudflare's setup instructions.
+3. Map `rove.example.com` to `http://127.0.0.1:8765`. A connector on another machine needs a reachable host address.
+4. Configure a Cloudflare Access self-hosted application and an identity allow policy for the domain, then verify that access requires authentication.
+5. Merge the following fields into Rove's runtime `config.json`, substitute your domain, and restart Rove.
+
+```json
+{
+  "allowed_hosts": ["localhost", "127.0.0.1", "rove.example.com"],
+  "origins": ["http://localhost:8765", "http://127.0.0.1:8765", "https://rove.example.com"],
+  "public_base_url": "https://rove.example.com"
+}
+```
+
+Tunnel uses outbound connections and typically requires no router port forwarding. With a connector on the same host, Rove can stay bound to loopback. HTTPS provides the secure context needed for PWA installation and Web Push. Follow the [official Cloudflare Tunnel setup guide](https://developers.cloudflare.com/tunnel/get-started/).
+
+### Tailscale Serve
+
+Install Tailscale on the host and phone, join the same tailnet, and keep Rove bound to loopback.
+
+```bash
+tailscale serve --bg http://127.0.0.1:8765
+```
+
+Complete the HTTPS setup when prompted. Add the hostname from the output to `allowed_hosts`, add its HTTPS origin to `origins`, and set `public_base_url`. Restart Rove, connect the phone to Tailscale, and open the resulting URL. See the [official Tailscale Serve reference](https://tailscale.com/docs/reference/tailscale-cli/serve).
+
+After connecting, check quotas, history, streaming, and an approval or question submission. For a 403 response, check the configured host, scheme, and port. Other reverse proxies must support WebSocket forwarding and use a narrowly scoped list of trusted proxy addresses.
+
+## Use cases
+
+- **Mobile vibe coding** — continue host-based coding tasks from your phone's browser.
+- **Codex and Claude Code Web UI** — operate configured coding agents through one web interface.
+- **Cross-model coding workflows** — continue analysis, implementation, and review within a shared conversation.
+- **Self-hosted AI coding assistant** — run against local repositories and terminals on macOS, Linux, or PVE.
 
 ## Operations and verification
 

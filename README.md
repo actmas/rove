@@ -1,9 +1,9 @@
-# Rove · 本地优先的多引擎 AI 编程工作台
+# Rove · 网页与手机上的 Vibe Coding 工作台
 
 **简体中文** · [English](./README.en.md)
 
 <p align="center">
-  <strong>Compute & Credentials Stay on Your Host · Control Your AI Coding Agents from Anywhere</strong><br/>
+  <strong>通过浏览器远程控制 Codex、Antigravity 与 AI 编程 Agent</strong><br/>
   <sub>OpenAI Codex · Google Antigravity · Claude Code · Gemini CLI · Aider · OpenCode · Persistent PTY · Git Worktree Pool</sub>
 </p>
 
@@ -19,11 +19,9 @@
 
 ## 用手机继续电脑上的编程任务
 
-Rove 把本机 AI 编程工具集中到一个可远程访问的工作台。你可以在电脑上开始任务，在手机上查看进展、回答问题和处理审批，也可以在同一个会话中切换模型或引擎继续工作。
+Rove 是开源、自托管的网页 AI 编程工作台（Web UI），支持通过手机、平板和电脑浏览器进行 Vibe Coding。它把本机 Codex、Antigravity、Claude Code 等 AI 编程工具集中到一个可远程访问的界面。你可以在电脑上开始任务，在手机上查看进展、回答问题和处理审批，也可以在同一个会话中切换模型或引擎继续工作。
 
 ### 实际运行界面
-
-以下截图于 2026-11-15 从本地运行的 Rove 页面采集。邮箱已替换为示例地址，项目名已匿名化，会话列表已隐藏。额度数值来自采集时的账号状态，随账号、模型和时间变化。界面当前以中文展示。
 
 ![Rove 桌面工作台，包含项目、引擎、模型和推理强度选择](./docs/images/workspace-desktop.png)
 
@@ -148,6 +146,67 @@ cat ~/.config/walking-workstation/access-password.txt
 > 密码采用 `scrypt` 哈希加盐存储于 `~/.config/walking-workstation/auth.json`，修改后会自动销毁初始明文密码文件并吊销所有历史登录会话。
 
 ---
+
+## 外网访问与手机远程编程
+
+先完成本地启动和访问密码设置，再选择连接方式。手机连接后即可查看任务、切换模型、继续对话和处理审批。
+
+| 访问方式 | 适用场景 | 浏览器地址 |
+| --- | --- | --- |
+| 局域网 | 手机与工作站连接同一网络 | `http://工作站局域网IP:8765` |
+| Tailscale Serve | 自己的设备通过 Tailscale 远程连接 | Serve 输出的 HTTPS 地址 |
+| Cloudflare Tunnel + Access | 使用自定义域名，通过浏览器从外网登录 | `https://rove.example.com` |
+
+### 局域网访问
+
+将监听地址设为 `0.0.0.0`，并在工作站防火墙允许可信局域网设备访问该端口。
+
+```bash
+./.venv/bin/python -m uvicorn workstation.server:app --host 0.0.0.0 --port 8765
+```
+
+在实际运行数据目录的 `config.json` 中，将工作站 IP 加入 `allowed_hosts`，把完整的 `http://IP:8765` 加入 `origins`，并更新 `lan_url`。保留已有配置字段和本机地址。手机访问该地址并输入 Rove 密码。
+
+### 使用 Cloudflare Tunnel 和自定义域名
+
+需要 Cloudflare 账号、已接入 Cloudflare 的域名，以及安装在工作站上的 `cloudflared`。
+
+1. 保持 Rove 运行于 `http://127.0.0.1:8765`。
+2. 按 Cloudflare 的安装指引创建 Tunnel，并在工作站本地配置连接器凭据。
+3. 添加应用路由，将自定义主机名 `rove.example.com` 指向服务 `http://127.0.0.1:8765`。若连接器运行在另一台机器，使用它实际可达的工作站地址。
+4. 为该域名配置 Cloudflare Access 自托管应用及允许登录的身份策略，然后验证域名访问会进入身份验证流程。
+5. 合并以下字段到 Rove 的 `config.json`，然后重启 Rove 服务。将示例域名替换为自己的域名。
+
+```json
+{
+  "allowed_hosts": ["localhost", "127.0.0.1", "rove.example.com"],
+  "origins": ["http://localhost:8765", "http://127.0.0.1:8765", "https://rove.example.com"],
+  "public_base_url": "https://rove.example.com"
+}
+```
+
+Tunnel 通过出站连接提供访问，通常无需在路由器上转发端口。连接器与 Rove 同机时，可以让 Rove 继续监听回环地址。HTTPS 也为 PWA 安装和 Web Push 提供所需的安全上下文。安装与路由步骤见 [Cloudflare Tunnel 官方文档](https://developers.cloudflare.com/tunnel/get-started/)。
+
+### 使用 Tailscale Serve
+
+在工作站和手机上安装并登录同一个 tailnet，保持 Rove 监听 `127.0.0.1:8765`，在工作站执行以下命令。
+
+```bash
+tailscale serve --bg http://127.0.0.1:8765
+```
+
+按照命令提示完成 HTTPS 设置。把输出地址的主机名加入 `allowed_hosts`，将完整 HTTPS 来源加入 `origins`，并写入 `public_base_url`。重启 Rove 后，在已连接 Tailscale 的手机浏览器中打开该地址。配置方法见 [Tailscale Serve 官方文档](https://tailscale.com/docs/reference/tailscale-cli/serve)。
+
+### 连接后检查
+
+登录后检查额度面板、会话历史和流式输出，确认一次提问或审批能够正常提交。若页面能打开但操作返回 403，核对 `allowed_hosts` 与 `origins` 中的域名、协议和端口。使用其他反向代理时，需要同时转发 WebSocket 连接，并仅信任实际使用的代理地址。
+
+## 常见使用场景
+
+- **手机 Vibe Coding** — 外出时通过网页继续电脑上的 AI 编程任务。
+- **Codex / Claude Code Web UI** — 把已配置的命令行编程工具集中到浏览器界面。
+- **跨模型协作编程** — 在统一会话中切换模型或引擎，接续分析、实现与代码审查。
+- **自托管 AI 编程助手** — 在 Mac mini、Linux 主机或 PVE 环境运行，连接本地仓库和终端。
 
 ## Configuration & Operations
 
