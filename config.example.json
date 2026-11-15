@@ -1,0 +1,23 @@
+{
+  "allowed_roots": [
+    "/Users/yourname/Projects",
+    "/Users/yourname/Documents/Codex"
+  ],
+  "allowed_hosts": [
+    "localhost",
+    "127.0.0.1",
+    "192.168.1.100",
+    "rove.example.com"
+  ],
+  "origins": [
+    "http://localhost:8765",
+    "http://127.0.0.1:8765",
+    "http://192.168.1.100:8765",
+    "https://rove.example.com"
+  ],
+  "lan_url": "http://192.168.1.100:8765",
+  "public_base_url": "https://rove.example.com",
+  "codex_bin": "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+  "antigravity_bin": "/Users/yourname/.local/bin/agy",
+  "vapid_subject": "mailto:admin@example.com"
+}

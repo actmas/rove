@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Rove Watch Live</title>
+  <style>
+    :root {
+      --bg: #000000;
+      --card-bg: #121418;
+      --border: #232730;
+      --text: #f3f4f6;
+      --muted: #9ca3af;
+      --dim: #6b7280;
+      --emerald: #10b981;
+      --amber: #f59e0b;
+      --blue: #3b82f6;
+    }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    html, body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Rounded", "SF Pro Text", system-ui, sans-serif;
+      font-size: 13px;
+      line-height: 1.45;
+      min-height: 100vh;
+      overflow-x: hidden;
+      overflow-y: auto;
+      overscroll-behavior-y: contain;
+      -webkit-font-smoothing: antialiased;
+    }
+    /* Fixed Top Header designed specifically for Watch */
+    .watch-header {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 50;
+      background: rgba(0, 0, 0, 0.95);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      padding: max(4px, env(safe-area-inset-top)) 10px 6px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .status-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--dim);
+    }
+    .dot.running {
+      background: var(--emerald);
+      box-shadow: 0 0 8px var(--emerald);
+      animation: pulse 1.6s infinite ease-in-out;
+    }
+    .dot.waiting {
+      background: var(--amber);
+      box-shadow: 0 0 8px var(--amber);
+      animation: pulse 1.2s infinite ease-in-out;
+    }
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.35); opacity: 0.65; }
+    }
+    .stopwatch {
+      font-family: "SF Pro Rounded", ui-monospace, monospace;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--muted);
+      letter-spacing: 0.3px;
+    }
+    .title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+    }
+    .session-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: #ffffff;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      flex: 1;
+    }
+    .lock-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      padding: 1px 5px;
+      border-radius: 10px;
+      background: #181b22;
+      border: 1px solid #2d3340;
+      color: #a0aec0;
+      font-size: 9px;
+      font-weight: 550;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    /* Content feed */
+    .watch-content {
+      padding: 58px 8px max(24px, env(safe-area-inset-bottom));
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 8px 10px;
+      word-break: break-word;
+      animation: fadeIn 0.18s ease-out;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(3px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .card-header {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 10.5px;
+      font-weight: 600;
+      color: var(--muted);
+      margin-bottom: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+    .card.user {
+      border-left: 3px solid var(--blue);
+    }
+    .card.reasoning {
+      border-left: 3px solid #8b5cf6;
+      background: #0f1016;
+    }
+    .card.terminal {
+      background: #090a0d;
+      border: 1px solid #1a1e27;
+      border-left: 3px solid var(--emerald);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+    }
+    .card.agent {
+      border-left: 3px solid #06b6d4;
+      background: #0c121d;
+    }
+    .card.change {
+      border-left: 3px solid var(--amber);
+      font-size: 11px;
+    }
+    .card pre {
+      white-space: pre-wrap;
+      font-family: inherit;
+      line-height: 1.4;
+    }
+    .terminal pre {
+      color: #34d399;
+      max-height: 140px;
+      overflow-y: auto;
+    }
+    .card-meta {
+      font-size: 9.5px;
+      color: var(--dim);
+      margin-top: 5px;
+    }
+    .empty-state {
+      padding: 30px 10px;
+      text-align: center;
+      color: var(--muted);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }
+    .empty-icon {
+      font-size: 26px;
+    }
+    .scroll-anchor {
+      height: 1px;
+    }
+    .safe-notice {
+      text-align: center;
+      font-size: 9px;
+      color: var(--dim);
+      padding: 8px 4px 0;
+    }
+    .watch-scroll-btn {
+      position: fixed;
+      bottom: max(14px, env(safe-area-inset-bottom));
+      right: 12px;
+      z-index: 60;
+      background: rgba(24, 27, 34, 0.92);
+      border: 1px solid #3b4252;
+      color: #ffffff;
+      font-size: 10px;
+      font-weight: 600;
+      padding: 3px 8px;
+      border-radius: 999px;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+    }
+  </style>
+</head>
+<body>
+  <header class="watch-header">
+    <div class="status-row">
+      <div class="status-badge">
+        <span class="dot" id="status-dot"></span>
+        <span id="status-text">连接中…</span>
+      </div>
+      <span class="stopwatch" id="stopwatch">--:--</span>
+    </div>
+    <div class="title-row">
+      <h1 class="session-title" id="session-title">Rove 监控</h1>
+      <span class="lock-pill" title="只读监控模式，无法输入或触发任何修改">🔒 只读锁定</span>
+    </div>
+  </header>
+
+  <main class="watch-content" id="content">
+    <div class="empty-state" id="empty-state">
+      <div class="empty-icon">⏳</div>
+      <div>正在连接 Mac mini…</div>
+    </div>
+    <div class="scroll-anchor" id="anchor"></div>
+  </main>
+
+  <button type="button" id="watch-scroll-btn" class="watch-scroll-btn" style="display:none;" aria-label="返回最新输出">
+    ⬇ 最新
+  </button>
+
+  <footer class="safe-notice">
+    🛡️ 只读视窗 · 防误触保护
+  </footer>
+
+  <script src="/watch/live.js"></script>
+</body>
+</html>

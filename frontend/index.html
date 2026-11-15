@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"/>
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff"/>
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0d0f13"/>
+  <meta name="application-name" content="Rove"/>
+  <meta name="mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-title" content="Rove"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="default"/>
+  <meta name="format-detection" content="telephone=no"/>
+  <link rel="icon" type="image/svg+xml" href="/rove-favicon.svg?v=4"/>
+  <link rel="icon" type="image/png" sizes="192x192" href="/rove-192.png?v=4"/>
+  <link rel="apple-touch-icon" sizes="180x180" href="/rove-apple-touch.png?v=4"/>
+  <link rel="manifest" href="/manifest.webmanifest?v=4"/>
+  <title>Rove</title>
+  <style>
+    html, body, #root {
+      height: 100%;
+      min-height: 100%;
+      margin: 0;
+      padding: 0;
+    }
+    html { background: #ffffff; color: #171717; }
+    @media (prefers-color-scheme: dark) {
+      html:not([data-theme="light"]) { background: #0d0f13; color: #f3f4f6; }
+    }
+    html[data-theme="dark"] { background: #0d0f13; color: #f3f4f6; }
+    .preboot {
+      min-height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      padding: 24px;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
+      text-align: center;
+    }
+    .preboot-logo {
+      width: 52px;
+      height: 52px;
+      border-radius: 15px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, #172033, #0d111a);
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      color: #38bdf8;
+      font-weight: 700;
+      font-size: 18px;
+      letter-spacing: -0.5px;
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
+    }
+    .preboot-title {
+      font-size: 15px;
+      font-weight: 600;
+      opacity: 0.92;
+    }
+    .preboot-sub {
+      font-size: 12.5px;
+      opacity: 0.6;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .preboot-dot {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      border: 2px solid rgba(128, 128, 128, 0.28);
+      border-top-color: #38bdf8;
+      animation: preboot-spin 0.75s linear infinite;
+    }
+    @keyframes preboot-spin {
+      to { transform: rotate(360deg); }
+    }
+    .preboot-fallback-card {
+      max-width: 380px;
+      width: 100%;
+      margin-top: 10px;
+      padding: 18px;
+      border-radius: 16px;
+      background: rgba(128, 128, 128, 0.08);
+      border: 1px solid rgba(128, 128, 128, 0.2);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      font-size: 13px;
+      box-sizing: border-box;
+      backdrop-filter: blur(10px);
+    }
+    .preboot-msg {
+      color: #f59e0b;
+      font-weight: 500;
+      line-height: 1.5;
+      font-size: 13px;
+    }
+    .preboot-actions {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .preboot-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      height: 38px;
+      padding: 0 14px;
+      border-radius: 10px;
+      border: 1px solid rgba(128, 128, 128, 0.25);
+      background: rgba(128, 128, 128, 0.12);
+      color: inherit;
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    .preboot-btn.primary {
+      background: #38bdf8;
+      color: #0f172a;
+      border-color: #38bdf8;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div id="root">
+    <div class="preboot" aria-label="正在启动 Rove">
+      <div class="preboot-logo">
+        <svg width="28" height="28" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+          <defs>
+            <linearGradient id="rove-pb" x1="18" y1="14" x2="48" y2="50" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#ffffff"/>
+              <stop offset="42%" stop-color="#f0f9ff"/>
+              <stop offset="72%" stop-color="#38bdf8"/>
+              <stop offset="100%" stop-color="#818cf8"/>
+            </linearGradient>
+          </defs>
+          <path d="M19.5 50V15H33.8a8.8 8.8 0 0 1 0 17.6H19.5" stroke="url(#rove-pb)" stroke-width="6.8" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M31.5 32.6 45.5 50" stroke="url(#rove-pb)" stroke-width="6.8" stroke-linecap="round"/>
+        </svg>
+      </div>
+      <div class="preboot-title">Rove</div>
+      <div class="preboot-sub" id="preboot-sub"><span class="preboot-dot"></span><span>正在启动工作区界面…</span></div>
+
+      <div id="preboot-fallback" class="preboot-fallback-card" style="display: none;">
+        <div id="preboot-msg" class="preboot-msg">连接较慢，建议刷新或尝试局域网直连</div>
+        <div class="preboot-actions">
+          <button type="button" id="preboot-clear" class="preboot-btn">清理界面缓存并重试</button>
+          <button type="button" class="preboot-btn primary" id="preboot-reload">立即刷新</button>
+          <a id="preboot-switch-link" class="preboot-btn" style="display:none;" href="#">切换至局域网直连</a>
+        </div>
+      </div>
+    </div>
+  </div>
+  <!--__ROVE_BOOTSTRAP__-->
+  <script>
+    (function() {
+      window.__purgeAndReload = function() {
+        try { localStorage.clear(); sessionStorage.clear(); } catch(e) {}
+        if (typeof caches !== 'undefined') {
+          caches.keys().then(function(keys) {
+            return Promise.all(keys.map(function(k) { return caches.delete(k); }));
+          }).then(function() {
+            if (navigator.serviceWorker) {
+              navigator.serviceWorker.getRegistrations().then(function(regs) {
+                regs.forEach(function(r) { r.unregister(); });
+                window.location.reload();
+              });
+            } else {
+              window.location.reload();
+            }
+          }).catch(function() { window.location.reload(); });
+        } else {
+          window.location.reload();
+        }
+      };
+
+      var reload = document.getElementById('preboot-reload');
+      if (reload) reload.onclick = function() { window.location.reload(); };
+      var clear = document.getElementById('preboot-clear');
+      if (clear) clear.onclick = window.__purgeAndReload;
+      var timer = setTimeout(function() {
+        var card = document.getElementById('preboot-fallback');
+        if (card) {
+          card.style.display = 'flex';
+          var sub = document.getElementById('preboot-sub');
+          if (sub) sub.style.opacity = '0.4';
+          var swLink = document.getElementById('preboot-switch-link');
+          var ep = (window.__ROVE_BOOTSTRAP__ && window.__ROVE_BOOTSTRAP__.endpoints) || {};
+          if (swLink) {
+            if (window.location.protocol === 'https:' && ep.lan_url) {
+              swLink.href = ep.lan_url;
+              swLink.textContent = '切换至局域网直连 (' + ep.lan_url.replace(/^https?:\/\//, '') + ')';
+              swLink.style.display = 'inline-flex';
+            } else if (window.location.protocol !== 'https:' && ep.public_url) {
+              swLink.href = ep.public_url;
+              swLink.textContent = '切换至公网安全域名 (' + ep.public_url.replace(/^https?:\/\//, '') + ')';
+              swLink.style.display = 'inline-flex';
+            }
+          }
+        }
+      }, 6000);
+
+      window.__clearPrebootWatchdog = function() {
+        clearTimeout(timer);
+      };
+
+      window.addEventListener('error', function(e) {
+        var targetUrl = (e.target && (e.target.src || e.target.href)) || e.filename || '';
+        if (targetUrl && targetUrl.indexOf(window.location.origin) === -1 && /^https?:/i.test(targetUrl)) {
+          return;
+        }
+        var card = document.getElementById('preboot-fallback');
+        var msg = document.getElementById('preboot-msg');
+        if (card && msg) {
+          msg.textContent = '界面加载异常: ' + (e.message || targetUrl || '脚本解析中断');
+          msg.style.color = '#ef4444';
+          card.style.display = 'flex';
+        }
+      }, true);
+
+      window.addEventListener('vite:preloadError', function(e) {
+        if (e.preventDefault) e.preventDefault();
+        var card = document.getElementById('preboot-fallback');
+        var msg = document.getElementById('preboot-msg');
+        if (card) card.style.display = 'flex';
+        if (msg) msg.textContent = '界面资源版本已更新或下载失败，请点击刷新。';
+      });
+    })();
+  </script>
+  <script type="module" src="/src/main.jsx"></script>
+</body>
+</html>

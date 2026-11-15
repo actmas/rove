@@ -1,0 +1,41 @@
+# Python & Virtual Environments
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node & Frontend
+node_modules/
+frontend/node_modules/
+.pnpm-debug.log*
+npm-debug.log*
+
+# Runtime, Local Data & Snapshots
+runtime/
+.worktrees/
+*.sqlite
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.tar.gz
+access-password.txt
+config.json
+auth.json
+vapid.json
+feishu.json
+cluster.json
+agents.json
+.env
+.env.local
+
+# macOS & Xcode
+.DS_Store
+xcuserdata/
+*.xcworkspace/
+build/
+DerivedData/
