@@ -543,6 +543,127 @@ class WorkstationTests(unittest.TestCase):
         restored = self.client.get('/api/state').json()
         self.assertIn('tid-locked', [s.get('native_id') for s in restored['sessions']])
 
+    def test_codex_idle_persistent_writer_lock_allows_input_and_forks(self):
+        import asyncio
+        from unittest.mock import patch
+        from workstation import worker
+
+        codex_dir, _, subrepo = self._setup_mock_codex_home()
+        rollout_path = codex_dir / 'sessions/2026/11/02/rollout-idle-lock.jsonl'
+        rollout_path.write_text(
+            '\n'.join([
+                json.dumps({'ordinal': 1, 'type': 'event_msg', 'payload': {'type': 'task_started', 'turn_id': 't-1'}}),
+                json.dumps({'ordinal': 2, 'type': 'event_msg', 'payload': {'type': 'task_complete', 'turn_id': 't-1'}}),
+            ]) + '\n',
+            encoding='utf-8',
+        )
+        with contextlib.closing(sqlite3.connect(codex_dir / 'state_5.sqlite')) as sconn, sconn:
+            sconn.execute(
+                'INSERT INTO threads VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                ('tid-idle-locked', str(rollout_path), 1793600000, int(time.time()), 'vscode', 'user', 'Codex Desktop',
+                 None, str(subrepo), '原生端已完成但仍持锁', None, '', '', 0, 'gpt-6.1-sol', 'high', 0, 0, None),
+            )
+
+        lock_file = codex_dir / 'thread-writer-locks/tid-idle-locked.lock'
+        lock_file.write_text('', encoding='utf-8')
+        fd = os.open(str(lock_file), os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # Even while native client holds flock, completed turn must NOT lock Rove UI/API input.
+            state = self.client.get('/api/state').json()
+            target = next(s for s in state['sessions'] if s['native_id'] == 'tid-idle-locked')
+            self.assertFalse(target['external_active'])
+            self.assertFalse(target['writer_locked'])
+
+            fake_bin = Path(self.temp.name) / 'fake-codex'
+            fake_bin.write_text('#!/bin/sh\n', encoding='utf-8')
+            cfg = db.config()
+            cfg['codex_bin'] = str(fake_bin)
+            db.write_private(db.DATA / 'config.json', json.dumps(cfg))
+
+            with patch('workstation.server.spawn'):
+                res = self.post(f"sessions/{target['id']}/messages", {'text': '继续任务', 'request_id': secrets.token_hex(16)})
+            self.assertEqual(res.status_code, 200, res.text)
+            job = res.json()
+
+            calls = []
+            forked_rollout = str(codex_dir / 'sessions/2026/11/15/rollout-forked.jsonl')
+
+            class FakeRPC:
+                def __init__(self, binary, notify, request):
+                    self.notify = notify
+                    self.reader = asyncio.create_task(asyncio.sleep(0))
+
+                async def start(self):
+                    return {}
+
+                async def call(self, method, params=None, timeout=60):
+                    calls.append((method, params))
+                    if method == 'thread/fork':
+                        return {'thread': {'id': 'tid-forked', 'path': forked_rollout}}
+                    if method == 'turn/start':
+                        await self.notify('turn/completed', {'turn': {'id': 'turn-new', 'status': 'completed'}})
+                        return {'turn': {'id': 'turn-new'}}
+                    raise AssertionError(f'Unexpected RPC call: {method}')
+
+                async def close(self):
+                    if not self.reader.done():
+                        self.reader.cancel()
+
+            session_row = db.one('SELECT * FROM sessions WHERE id=?', (target['id'],))
+            project_row = db.one('SELECT * FROM projects WHERE id=?', (session_row['project_id'],))
+            with patch.object(worker, 'CodexRPC', FakeRPC):
+                outcome = asyncio.run(worker.run_codex(job, session_row, project_row))
+            self.assertEqual(outcome['status'], 'completed')
+            self.assertEqual([c[0] for c in calls], ['thread/fork', 'turn/start'])
+            self.assertEqual(calls[0][1]['threadId'], 'tid-idle-locked')
+
+            updated = db.one('SELECT * FROM sessions WHERE id=?', (target['id'],))
+            self.assertEqual(updated['native_codex_id'], 'tid-forked')
+            self.assertEqual(updated['rollout_path'], forked_rollout)
+            self.assertEqual(updated['codex_rollout_offset'], 0)
+            self.assertTrue(db.one('SELECT 1 FROM dismissed_codex_threads WHERE native_id=?', ('tid-idle-locked',)))
+
+            # Next codex sync must not re-import the superseded locked thread as a duplicate session.
+            from workstation import codex_sync
+            codex_sync.sync_projects_and_threads(force=True)
+            all_sessions = db.query('SELECT * FROM sessions')
+            self.assertFalse(any(s.get('native_codex_id') == 'tid-idle-locked' for s in all_sessions))
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    def test_state_merge_preserves_codex_external_active_with_agy_id(self):
+        from unittest.mock import patch
+        codex_dir, _, subrepo = self._setup_mock_codex_home()
+        rollout_path = codex_dir / 'sessions/2026/11/02/rollout-dual.jsonl'
+        rollout_path.write_text(
+            json.dumps({'ordinal': 1, 'type': 'event_msg', 'payload': {'type': 'task_started', 'turn_id': 't-dual'}}) + '\n',
+            encoding='utf-8',
+        )
+        with contextlib.closing(sqlite3.connect(codex_dir / 'state_5.sqlite')) as sconn, sconn:
+            sconn.execute(
+                'INSERT INTO threads VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                ('tid-dual', str(rollout_path), 1793600000, int(time.time()), 'vscode', 'user', 'Codex Desktop',
+                 None, str(subrepo), '双引擎活跃锁测试', None, '', '', 0, 'gpt-6.1-sol', 'high', 0, 0, None),
+            )
+        state = self.client.get('/api/state').json()
+        target = next(s for s in state['sessions'] if s.get('native_codex_id') == 'tid-dual')
+        db.execute('UPDATE sessions SET native_antigravity_id=? WHERE id=?', ('agy-idle-conv', target['id']))
+        lock_file = codex_dir / 'thread-writer-locks/tid-dual.lock'
+        lock_file.write_text('', encoding='utf-8')
+        fd = os.open(str(lock_file), os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with patch('workstation.antigravity_sync.live_antigravity_states', return_value={target['id']: {'external_active': False, 'writer_locked': False}}):
+                st2 = self.client.get('/api/state').json()
+            t2 = next(s for s in st2['sessions'] if s['id'] == target['id'])
+            self.assertTrue(t2['external_active'])
+            self.assertTrue(t2['writer_locked'])
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
     def test_antigravity_hub_bypasses_cli_region_restriction_and_streams_steps(self):
         import asyncio
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer

@@ -1,19 +1,19 @@
 /* Walking Workstation Service Worker: Instant App-Shell Boot, WebAPK, Offline Fallback & Web Push */
-const CACHE_NAME = 'walking-workstation-shell-983bdc4688';
+const CACHE_NAME = 'walking-workstation-shell-9a87765878';
 const PRECACHE_ASSETS = [
   "/",
   "/manifest.webmanifest",
   "/rove-favicon.svg",
   "/rove-apple-touch.png",
   "/rove-192.png",
-  "/watch/assets/InstallGuideModal-BWNHczZ8.js",
+  "/watch/assets/InstallGuideModal-8XkmRY1E.js",
   "/watch/assets/PermissionModal-BZsqduwx.js",
-  "/watch/assets/ProjectMemoriesModal-Dl6yvcXL.js",
-  "/watch/assets/QuotaModal-lWLKe30Q.js",
-  "/watch/assets/SettingsPanel-ColVLOQL.js",
-  "/watch/assets/WorktreeModal-PB5fn_6G.js",
+  "/watch/assets/ProjectMemoriesModal-BILBhYYq.js",
+  "/watch/assets/QuotaModal-CwfL6OrS.js",
+  "/watch/assets/SettingsPanel-Dkt-uWjX.js",
+  "/watch/assets/WorktreeModal-0P_X_4zI.js",
   "/watch/assets/index-B0loJE54.css",
-  "/watch/assets/index-DqepgYhw.js",
+  "/watch/assets/index-DjSBSGKx.js",
   "/watch/assets/vendor-icons-1nB3l9_f.js",
   "/watch/assets/vendor-markdown-D6awl5rF.js",
   "/watch/assets/vendor-react-BCaoD2OB.js"
@@ -179,7 +179,7 @@ self.addEventListener('activate', event => {
     const keys = await caches.keys();
     await Promise.all(
       keys
-        .filter(k => (k.startsWith('walking-workstation-') || k === 'walking-workstation-shell-983bdc4688') && k !== CACHE_NAME)
+        .filter(k => (k.startsWith('walking-workstation-') || k === 'walking-workstation-shell-9a87765878') && k !== CACHE_NAME)
         .map(k => caches.delete(k)),
     );
     await self.clients.claim();

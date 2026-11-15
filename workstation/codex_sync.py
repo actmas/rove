@@ -571,8 +571,8 @@ def live_thread_states(sessions: list[dict], active_local_session_ids: set[str])
         running = tid in in_progress_turns
         if not running and (locked or now - float(s.get('updated') or 0) < 300):
             running = _rollout_has_unfinished_turn(_resolve_rollout_path(home, s.get('rollout_path')))
-        if locked or running:
-            states[s['id']] = {'external_active': running, 'writer_locked': locked}
+        if running:
+            states[s['id']] = {'external_active': True, 'writer_locked': locked}
     return states
 
 

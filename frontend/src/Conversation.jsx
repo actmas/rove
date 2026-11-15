@@ -899,7 +899,7 @@ export default function Conversation({
   );
   const localActive = Boolean(job && activeStates.has(job.status) && !jobFinishedInStream);
   const externalActive = Boolean(!localActive && session?.external_active);
-  const writerLocked = Boolean(!localActive && !externalActive && session?.writer_locked);
+  const writerLocked = false;
   const active = localActive || externalActive;
   const previousSession = useRef(session?.id);
 

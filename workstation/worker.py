@@ -169,15 +169,15 @@ async def run_codex(job, session, project):
     workdir = db.session_workdir(session, project)
 
     native_codex_id = db.get_codex_native_id(session)
-    if native_codex_id and codex_sync.is_thread_locked(native_codex_id):
+    external_locked = bool(native_codex_id and codex_sync.is_thread_locked(native_codex_id))
+    if external_locked and codex_sync.is_thread_running_externally(native_codex_id, session.get('rollout_path')):
         for _ in range(6):
             await asyncio.sleep(.5)
-            if not codex_sync.is_thread_locked(native_codex_id):
+            external_locked = codex_sync.is_thread_locked(native_codex_id)
+            if not external_locked or not codex_sync.is_thread_running_externally(native_codex_id, session.get('rollout_path')):
                 break
         else:
-            if codex_sync.is_thread_running_externally(native_codex_id, session.get('rollout_path')):
-                raise RuntimeError('Mac 本机 Codex 正在执行此会话，请等待当前回合完成后继续。')
-            raise RuntimeError('此原生会话正被其他客户端（如飞书桥接或外部进程）占用写入锁，请先释放占用端或新建会话。')
+            raise RuntimeError('Mac 本机 Codex 正在执行此会话，请等待当前回合完成后继续。')
 
     if db.get_antigravity_native_id(session):
         with contextlib.suppress(Exception):
@@ -200,16 +200,34 @@ async def run_codex(job, session, project):
             params['model'] = model
         if fast:
             params['serviceTier'] = 'priority'
+        original_codex_id = native_codex_id
         resumed = False
-        if native_codex_id:
+        need_fork = external_locked
+        if native_codex_id and not need_fork:
             try:
                 result = await asyncio.wait_for(
                     rpc.call('thread/resume', {**params, 'threadId': native_codex_id, 'excludeTurns': True}),
                     timeout=10.0,
                 )
                 resumed = True
-            except TimeoutError as exc:
-                raise RuntimeError('恢复原生会话超时：该会话正被本机其他 Codex 客户端占用写入锁。') from exc
+            except TimeoutError:
+                need_fork = True
+            except RuntimeError as exc:
+                err_lower = str(exc).lower()
+                if 'active writer' in err_lower or 'writer lock' in err_lower:
+                    need_fork = True
+                elif 'no rollout found' in err_lower or 'not found' in err_lower or 'does not exist' in err_lower:
+                    native_codex_id = None
+                else:
+                    raise
+        if native_codex_id and not resumed and need_fork:
+            try:
+                # Native desktop clients hold thread-writer-locks while open; fork preserves full context without blocking.
+                result = await asyncio.wait_for(
+                    rpc.call('thread/fork', {**params, 'threadId': native_codex_id, 'excludeTurns': True}),
+                    timeout=10.0,
+                )
+                resumed = True
             except RuntimeError as exc:
                 err_lower = str(exc).lower()
                 if 'no rollout found' in err_lower or 'not found' in err_lower or 'does not exist' in err_lower:
@@ -219,7 +237,22 @@ async def run_codex(job, session, project):
         if not resumed:
             result = await rpc.call('thread/start', params)
         thread = result['thread']['id']
-        db.execute('UPDATE sessions SET native_id=?, native_codex_id=?, last_engine=?, cwd=COALESCE(cwd, ?) WHERE id=?', (thread, thread, 'codex', workdir, session['id']))
+        new_rollout_path = result['thread'].get('path')
+        if original_codex_id and thread != original_codex_id:
+            db.execute(
+                'UPDATE sessions SET native_id=?, native_codex_id=?, last_engine=?, cwd=COALESCE(cwd, ?), '
+                'rollout_path=COALESCE(?, rollout_path), codex_synced_ordinal=-1, codex_rollout_offset=0 WHERE id=?',
+                (thread, thread, 'codex', workdir, new_rollout_path, session['id']),
+            )
+            db.execute(
+                'INSERT OR REPLACE INTO dismissed_codex_threads(native_id, dismissed_at) VALUES(?, ?)',
+                (original_codex_id, time.time()),
+            )
+        else:
+            db.execute(
+                'UPDATE sessions SET native_id=?, native_codex_id=?, last_engine=?, cwd=COALESCE(cwd, ?) WHERE id=?',
+                (thread, thread, 'codex', workdir, session['id']),
+            )
         db.event(session['id'], job['id'], 'native_session', {'id': thread})
 
         inputs = [{'type': 'localImage', 'path': str(p)} for p in _session_images(session['id'], job.get('images'))]

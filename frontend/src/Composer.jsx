@@ -328,7 +328,7 @@ export default function Composer({
     if (submit) {
       return submit(e);
     }
-    if ((!prompt.trim() && !images.length) || busy || writerLocked) return;
+    if ((!prompt.trim() && !images.length) || busy) return;
     if (onSend) {
       if (cloud && engine !== 'codex' && !agentSpec?.builtin && agentSpec?.cloud_url) {
         window.open(agentSpec.cloud_url, '_blank', 'noopener,noreferrer');
@@ -359,7 +359,7 @@ export default function Composer({
 
   const projectObj = projects.find(p => p.id === projectId);
   const busy = active || Boolean(externalActive) || sending;
-  const canSend = (prompt.trim().length > 0 || images.length > 0) && !busy && !writerLocked;
+  const canSend = (prompt.trim().length > 0 || images.length > 0) && !busy;
   const workspaceProjects = projects.filter(p => p.is_workspace);
   const repoProjects = projects.filter(p => !p.is_workspace);
 
@@ -409,11 +409,9 @@ export default function Composer({
           placeholder={
             externalActive
               ? 'Mac 本机 Codex 正在执行当前回合，完成后可在此无缝接力…'
-              : writerLocked
-                ? '此原生会话当前被其他客户端持有写入锁，释放后可在此继续发送…'
-                : mode === 'plan'
-                  ? '输入想分析的问题或架构方案（只读规划，不修改代码）…'
-                  : '描述编程任务、粘贴截图，或输入 @ 引用项目文件…'
+              : mode === 'plan'
+                ? '输入想分析的问题或架构方案（只读规划，不修改代码）…'
+                : '描述编程任务、粘贴截图，或输入 @ 引用项目文件…'
           }
           value={prompt}
           onChange={handleChange}
@@ -663,12 +661,6 @@ export default function Composer({
             )}
           </div>
         </div>
-
-        {writerLocked && !externalActive && (
-          <div className="engine-warning lock-warning">
-            该会话正被本机其他客户端（如飞书桥接）持有写入锁；释放后可直接继续，或点击左上角“新建任务”。
-          </div>
-        )}
 
         {engine === 'antigravity' && engineState?.status === 'blocked' && (
           <button type="button" className="engine-warning" onClick={onOpenSettings}>

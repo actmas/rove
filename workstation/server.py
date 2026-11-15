@@ -332,11 +332,12 @@ async def state(sync: bool = True):
     active_local = {j['session_id'] for j in jobs_list if j['status'] in ('queued', 'running', 'waiting')}
     live_map_codex = await asyncio.to_thread(codex_sync.live_thread_states, sessions_list, active_local)
     live_map_agy = await asyncio.to_thread(antigravity_sync.live_antigravity_states, sessions_list, active_local)
-    live_map = {**live_map_codex, **live_map_agy}
     for s in sessions_list:
-        st = live_map.get(s['id'])
-        s['external_active'] = bool(st and st.get('external_active'))
-        s['writer_locked'] = bool(st and st.get('writer_locked'))
+        sid = s['id']
+        stc = live_map_codex.get(sid)
+        sta = live_map_agy.get(sid)
+        s['external_active'] = bool((stc and stc.get('external_active')) or (sta and sta.get('external_active')))
+        s['writer_locked'] = bool((stc and stc.get('writer_locked')) or (sta and sta.get('writer_locked')))
 
     home = codex_sync.codex_home()
     agy_home = antigravity_sync.antigravity_home()
@@ -838,12 +839,8 @@ async def send_message(ident: str, body: Prompt):
         local_live = db.one("SELECT 1 FROM jobs WHERE session_id=? AND status IN ('queued','running','waiting')", (ident,))
         if not local_live and await asyncio.to_thread(codex_sync.is_thread_locked, native_codex_id):
             ext_running = await asyncio.to_thread(codex_sync.is_thread_running_externally, native_codex_id, s.get('rollout_path'))
-            detail = (
-                'Mac 本机 Codex 正在执行此会话，请等待当前回合完成后继续'
-                if ext_running
-                else '此原生会话正被其他客户端（如飞书桥接）占用写入锁，请先释放占用端或新建会话'
-            )
-            raise HTTPException(409, detail)
+            if ext_running:
+                raise HTTPException(409, 'Mac 本机 Codex 正在执行此会话，请等待当前回合完成后继续')
 
     if body.use_worktree is True and not s.get('use_worktree'):
         p_obj = project(s['project_id'])
