@@ -1,4 +1,6 @@
-# Rove · Local-First Multi-Agent AI Coding Workstation
+# Rove · 本地优先的多引擎 AI 编程工作台
+
+**简体中文** · [English](./README.en.md)
 
 <p align="center">
   <strong>Compute & Credentials Stay on Your Host · Control Your AI Coding Agents from Anywhere</strong><br/>
@@ -15,14 +17,47 @@
 
 ---
 
-## Why Rove?
+## 用手机继续电脑上的编程任务
+
+Rove 把本机 AI 编程工具集中到一个可远程访问的工作台。你可以在电脑上开始任务，在手机上查看进展、回答问题和处理审批，也可以在同一个会话中切换模型或引擎继续工作。
+
+### 实际运行界面
+
+以下截图于 2026-11-15 从本地运行的 Rove 页面采集。邮箱已替换为示例地址，项目名已匿名化，会话列表已隐藏。额度数值来自采集时的账号状态，随账号、模型和时间变化。界面当前以中文展示。
+
+![Rove 桌面工作台，包含项目、引擎、模型和推理强度选择](./docs/images/workspace-desktop.png)
+
+![实际模型额度面板，包含可用比例和刷新倒计时](./docs/images/model-quotas.png)
+
+<details>
+<summary>查看手机端实际界面</summary>
+
+<img src="./docs/images/workspace-mobile.png" alt="Rove 手机端工作台" width="390" />
+
+</details>
+
+### 项目特色
+
+| 能力 | 使用方式 |
+| --- | --- |
+| 模型额度可见 | 在额度面板查看 Codex 的 5 小时和周额度、Antigravity 模型额度与刷新倒计时。可用字段取决于引擎返回的数据。 |
+| 同一任务跨模型继续 | 在当前会话切换模型，沿用已有任务记录继续交流。 |
+| 跨引擎接力 | 从 Codex 切换到 Antigravity 等引擎时，结合历史对话、项目约定和文件修改记录生成交接上下文。接收引擎通过文本上下文继续任务。 |
+| 手机接管本机工作 | 通过浏览器或 PWA 查看流式输出、代码变更、终端和审批。任务由宿主机执行。 |
+| 项目记忆 | 保存开发规范、架构决策和构建命令，并在后续会话中注入。 |
+| 并行工作区 | 使用 Git Worktree 隔离不同会话的代码修改，再预览差异和合并。 |
+| 多端审批与通知 | 提供网页、墨水屏、手表监控页及可配置的飞书和 Web Push 通知。 |
+
+例如，先让 Codex 分析问题，再切换到 Antigravity 继续实现，随后切回 Codex 审查改动。Rove 保留统一会话记录，并为跨引擎切换准备交接内容。实际代码修改仍需审查和测试。
+
+## 为什么选择 Rove？
 
 **Rove（行走工作台）** 是一个运行在个人工作站（Mac mini / macOS / Linux / Proxmox VE）上的 **Local-First 多引擎 AI 编程工作台**。
 
-它将重度计算、本地代码仓库、Git 树以及本机已授权的客户端登录态（`ChatGPT.app / Codex CLI`、`Gemini.app / Antigravity`、`Claude Code` 等）100% 留在你的宿主机上，而向手机、平板、笔记本、墨水屏、智能手表提供轻量、极速、全功能的远程控制界面：
+它将重度计算、本地代码仓库、Git 树以及本机已授权的客户端登录态（`ChatGPT.app / Codex CLI`、`Gemini.app / Antigravity`、`Claude Code` 等）保存在你的宿主机上，而向手机、平板、笔记本、墨水屏、智能手表提供远程控制界面：
 
-- **零额外 API 账单**：直接复用宿主机已登录的 Codex (`app-server`) 与 Antigravity (`Connect-RPC` 本地 Hub / `agy` CLI) 订阅额度，无需另购昂贵的按量 API Key。
-- **脱离浏览器生命周期的持久运行**：AI 任务 (`worker.py`) 与 PTY 终端 (`terminal.py`) 作为独立守护进程运行（macOS 下自动持有 `caffeinate -i` 防止空闲休眠）。关闭网页、手机锁屏、切换网络甚至重启 Web 服务，正在执行的编码任务与测试均不会中断。
+- **复用本机已配置的引擎**：连接宿主机已登录的 Codex (`app-server`) 与 Antigravity (`Connect-RPC` 本地 Hub / `agy` CLI)。订阅额度与限制由对应服务决定，使用 HTTP API 时按提供商规则计费。
+- **脱离浏览器生命周期的持久运行**：AI 任务 (`worker.py`) 与 PTY 终端 (`terminal.py`) 作为独立守护进程运行（macOS 下自动持有 `caffeinate -i` 防止空闲休眠）。任务进程独立于网页连接和 Web 服务，便于离开页面后继续运行。宿主机及引擎进程需要保持可用。
 - **跨引擎无感接力 (`context_bridge.py`)**：在同一个会话中随时切换 Codex、Antigravity、Claude Code、Gemini CLI、Aider 或 OpenAI 兼容模型，系统在后台自动合成 Token 高效的增量交接上下文（Delta Handoff），无需重复解释背景。
 - **Mac 桌面端与移动端双向实时同步 (`codex_sync.py` & `antigravity_sync.py`)**：无论是在电脑桌面端 `ChatGPT.app` / `Antigravity.app` 发起的对话，还是在手机上发起的任务，双方历史记录、思考过程、命令输出、文件 Diff、Token 用量与写入锁状态实时双向对齐。
 
@@ -34,17 +69,17 @@
 
 ### 1. 多引擎原生适配与可插拔 Agent 中心
 - **OpenAI Codex 原生协议 (`workstation/rpc.py`)**：对接 `codex app-server` JSON-RPC 2.0，支持流式推理摘要、实时命令输出、文件变更卡片、交互式单次审批与提问回答、Priority 2x 极速通道，以及 `codex cloud exec` 云端环境投递。
-- **Google Antigravity 双通道 (`workstation/antigravity_hub.py`)**：优先自动发现并连接本机 `Gemini.app` / `Antigravity.app` 的本地 `Connect-RPC` Hub（合法复用宿主 Pro 授权，支持全系模型与多模态图片），无桌面端时平滑回退至独立 `agy` CLI。
+- **Google Antigravity 双通道 (`workstation/antigravity_hub.py`)**：优先自动发现并连接本机 `Gemini.app` / `Antigravity.app` 的本地 `Connect-RPC` Hub（使用宿主机已有登录状态，模型和图片能力取决于本机引擎），无桌面端时平滑回退至独立 `agy` CLI。
 - **通用多 Agent 扩展中心 (`workstation/agents.py`)**：内置 **Claude Code** (`claude`)、**Gemini CLI** (`gemini`)、**Aider** (`aider`)、**OpenCode** (`opencode`) 与 **OpenAI 兼容 HTTP API**（DeepSeek / OpenRouter / Ollama / vLLM）一键预设，支持动态注册任意自定义 CLI 或 HTTP Agent。
 - **实时模型目录与剩余额度监控 (`workstation/quotas.py`)**：动态同步本机可用模型与推理强度档位（`Low` / `Medium` / `High` / `X-High` / `Max` / `Ultra`），实时展示 5 小时滚动窗口与周配额百分比及刷新倒计时。
 
 ### 2. 上下文工程与并行代码治理
 - **Git Worktree 并行隔离池 (`workstation/worktree.py`)**：同一主工作区默认互斥防冲突；一键开启会话独立 Worktree（`.worktrees/rove-<id>`，自动写入 `.git/info/exclude` 零污染仓库），即可实现多 Agent 并发修改同一仓库，完成后支持三点 Diff 预览与一键 `Squash Merge`。
 - **跨会话持久记忆 (`workstation/memories.py`)**：借鉴 `claude-mem`，持久化保存项目的【开发规范】、【架构决策】、【硬性红线】与【构建测试】命令，支持从对话中自动提取并在新会话启动时按置顶优先级自动注入。
-- **Anti-AI-Slop 前端审美守卫 (`workstation/design_guard.py`)**：识别前端/UI 任务时自动注入工业级设计系统规范（拒绝俗套紫粉霓虹渐变与浓黑大阴影，推行中性表面分层、`1px` 半透明微边框、细腻圆角与完整 `:hover/:active/:focus-visible` 状态机），并提供代码静态审计。
+- **Anti-AI-Slop 前端审美守卫 (`workstation/design_guard.py`)**：识别前端/UI 任务时自动注入项目设计规范（拒绝俗套紫粉霓虹渐变与浓黑大阴影，推行中性表面分层、`1px` 半透明微边框、细腻圆角与完整 `:hover/:active/:focus-visible` 状态机），并提供代码静态审计。
 
 ### 3. 全场景多端触点与原子审批
-- **满血版 PWA 独立应用与自托管 Web Push (`workstation/webpush.py`)**：内置 RFC 8292 (`ES256`) VAPID 签名与 RFC 8291 (`aes128gcm`) 端到端加密推送引擎（基于系统 `libcrypto`，零第三方推送 SaaS 依赖）。当后台任务等待权限审批或执行完成时，实时推送到 iOS / Android 锁屏通知中心。
+- **PWA 独立应用与自托管 Web Push (`workstation/webpush.py`)**：内置 RFC 8292 (`ES256`) VAPID 签名与 RFC 8291 (`aes128gcm`) 端到端加密推送引擎（基于系统 `libcrypto`，零第三方推送 SaaS 依赖）。当后台任务等待权限审批或执行完成时，实时推送到 iOS / Android 锁屏通知中心。
 - **墨水屏极简审批台 (`/eink`) & 智能手表监控 (`/watch/live`)**：专为 Kindle/文石等墨水屏浏览器定制的高对比度零动画审批视图，以及适合 Apple Watch / 小屏设备的实时进度监控页。
 - **飞书多端协同机器人 (`workstation/feishu_relay.py`)**：高危命令待审批与任务完成主动推送至飞书，支持直接回复 `/approve <id>` 或 `/reject <id>` 远程决策，与网页、墨水屏共享 SQLite 事务级原子审批锁 (`store.decide_approval`)。
 
@@ -162,7 +197,7 @@ cat ~/.config/walking-workstation/access-password.txt
 
 ## Testing & Verification
 
-Rove 包含完整的后端单元/回归测试套件（14 个测试模块）与前端逻辑测试套件（4 个 ESM 测试模块）：
+Rove 包含完整的后端单元/回归测试套件与前端逻辑测试套件：
 
 ```bash
 # 运行 Python 后端测试套件（鉴权、并发锁、跨引擎上下文桥接、Worktree、记忆、飞书回调、数据压缩等）
