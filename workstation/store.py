@@ -357,6 +357,8 @@ def init():
             'native_antigravity_id': 'TEXT',
             'native_agent_ids': "TEXT NOT NULL DEFAULT '{}'",
             'last_engine': 'TEXT',
+            'external_stopped_at': 'REAL NOT NULL DEFAULT 0',
+            'external_stopped_marker': "TEXT NOT NULL DEFAULT ''",
         })
         _ensure_columns(db, 'jobs', {
             'execution_target': "TEXT NOT NULL DEFAULT 'local'",

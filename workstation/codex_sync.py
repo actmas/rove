@@ -513,12 +513,48 @@ def _rollout_has_unfinished_turn(rollout_path: str | None) -> bool:
     return last_state == 'task_started'
 
 
-def is_thread_running_externally(native_id: str | None, rollout_path: str | None = None, home: Path | None = None) -> bool:
+def external_activity_marker(native_id: str | None, rollout_path: str | None = None, home: Path | None = None) -> str:
+    """Return a snapshot marker for an active Codex rollout/thread."""
+    if not native_id:
+        return ''
+    home = home or codex_home()
+    if home:
+        resolved = _resolve_rollout_path(home, rollout_path)
+        if resolved:
+            resolved_path = Path(resolved)
+            if resolved_path.is_file():
+                with contextlib.suppress(OSError):
+                    st = resolved_path.stat()
+                    return f'codex:{st.st_size}:{st.st_mtime_ns}'
+    return f'codex:{native_id}'
+
+
+def mark_external_stopped(session_id: str, native_id: str, rollout_path: str | None = None, home: Path | None = None) -> None:
+    """Record that the user explicitly stopped/unblocked an externally-active Codex thread from Rove."""
+    marker = external_activity_marker(native_id, rollout_path, home) or f'codex:{native_id}'
+    db.execute(
+        'UPDATE sessions SET external_stopped_at=?, external_stopped_marker=? WHERE id=?',
+        (time.time(), marker, session_id),
+    )
+
+
+def is_thread_running_externally(
+    native_id: str | None,
+    rollout_path: str | None = None,
+    home: Path | None = None,
+    session: dict | None = None,
+) -> bool:
     if not native_id:
         return False
     home = home or codex_home()
     if not home:
         return False
+    if not is_thread_locked(native_id, home):
+        return False
+    if session:
+        stopped_marker = (session.get('external_stopped_marker') or '').strip()
+        if stopped_marker and stopped_marker == external_activity_marker(native_id, rollout_path, home):
+            return False
     th_db = home / 'thread_history_1.sqlite'
     if th_db.is_file():
         with contextlib.suppress(sqlite3.Error, OSError):
@@ -562,16 +598,20 @@ def live_thread_states(sessions: list[dict], active_local_session_ids: set[str])
                         in_progress_turns.add(r['thread_id'])
 
     states: dict[str, dict] = {}
-    now = time.time()
     for s in sessions:
         tid = db.get_codex_native_id(s)
         if not tid or s['id'] in active_local_session_ids:
             continue
         locked = tid in locked_native_ids
+        if not locked:
+            continue
         running = tid in in_progress_turns
-        if not running and (locked or now - float(s.get('updated') or 0) < 300):
+        if not running:
             running = _rollout_has_unfinished_turn(_resolve_rollout_path(home, s.get('rollout_path')))
         if running:
+            stopped_marker = (s.get('external_stopped_marker') or '').strip()
+            if stopped_marker and stopped_marker == external_activity_marker(tid, s.get('rollout_path'), home):
+                continue
             states[s['id']] = {'external_active': True, 'writer_locked': locked}
     return states
 

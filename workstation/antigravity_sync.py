@@ -305,6 +305,36 @@ def sync_antigravity_projects_and_sessions(force: bool = False, restore_dismisse
         return res
 
 
+def external_activity_marker(conv_id: str, home: Path | None = None) -> str:
+    """Return a snapshot marker for an active Antigravity conversation summary, or '' if idle."""
+    if not conv_id:
+        return ''
+    home = home or antigravity_home()
+    if not home:
+        return ''
+    summaries_db = home / 'conversation_summaries.db'
+    if not summaries_db.is_file():
+        return ''
+    with contextlib.suppress(sqlite3.Error, OSError):
+        with contextlib.closing(_ro_connect(summaries_db)) as conn:
+            row = conn.execute(
+                'SELECT step_count, last_modified_time FROM conversation_summaries WHERE conversation_id=? AND not_fully_idle = 1 LIMIT 1',
+                (conv_id,),
+            ).fetchone()
+            if row:
+                return f"{row['step_count']}:{row['last_modified_time']}"
+    return ''
+
+
+def mark_external_stopped(session_id: str, conv_id: str, home: Path | None = None) -> None:
+    """Record that the user explicitly stopped an externally-running Antigravity task from Rove."""
+    marker = external_activity_marker(conv_id, home) or f'stopped:{int(time.time())}'
+    db.execute(
+        'UPDATE sessions SET external_stopped_at=?, external_stopped_marker=?, antigravity_not_idle=0 WHERE id=?',
+        (time.time(), marker, session_id),
+    )
+
+
 def live_antigravity_states(sessions_list: list[dict], active_local_session_ids: set[str]) -> dict[str, dict]:
     """Map session_id -> external_active for Antigravity sessions running on Mac."""
     home = antigravity_home()
@@ -315,11 +345,13 @@ def live_antigravity_states(sessions_list: list[dict], active_local_session_ids:
     if not summaries_db.is_file():
         return {}
 
-    active_cids = set()
+    active_markers: dict[str, str] = {}
     with contextlib.suppress(sqlite3.Error, OSError):
         with contextlib.closing(_ro_connect(summaries_db)) as conn:
-            for r in conn.execute('SELECT conversation_id, not_fully_idle FROM conversation_summaries WHERE not_fully_idle = 1'):
-                active_cids.add(r['conversation_id'])
+            for r in conn.execute(
+                'SELECT conversation_id, step_count, last_modified_time FROM conversation_summaries WHERE not_fully_idle = 1'
+            ):
+                active_markers[r['conversation_id']] = f"{r['step_count']}:{r['last_modified_time']}"
 
     res = {}
     for s in sessions_list:
@@ -327,7 +359,9 @@ def live_antigravity_states(sessions_list: list[dict], active_local_session_ids:
         if not nid:
             continue
         sid = s['id']
-        is_active = nid in active_cids and sid not in active_local_session_ids
+        marker = active_markers.get(nid)
+        stopped_marker = (s.get('external_stopped_marker') or '').strip()
+        is_active = bool(marker) and sid not in active_local_session_ids and stopped_marker != marker
         res[sid] = {'external_active': is_active, 'writer_locked': is_active}
     return res
 

@@ -1446,6 +1446,127 @@ class WorkstationTests(unittest.TestCase):
         finally:
             quotas._CACHE.clear()
 
+    def test_stop_cancels_external_antigravity_cascade_and_unblocks_session(self):
+        from unittest.mock import patch
+
+        mock_agy = Path(self.temp.name) / 'mock-agy-stop'
+        mock_agy.mkdir(parents=True)
+        with contextlib.closing(sqlite3.connect(mock_agy / 'conversation_summaries.db')) as conn, conn:
+            conn.execute('''
+            CREATE TABLE conversation_summaries(
+                conversation_id text PRIMARY KEY,
+                title text,
+                preview text,
+                step_count integer NOT NULL,
+                last_modified_time datetime NOT NULL,
+                last_user_input_time datetime NOT NULL,
+                workspace_uris text NOT NULL,
+                not_fully_idle numeric NOT NULL DEFAULT 0
+            )
+            ''')
+            conn.execute(
+                'INSERT INTO conversation_summaries VALUES (?,?,?,?,?,?,?,?)',
+                ('conv-agy-stuck', '后台持续进程', '预览', 4, '2026-11-15 12:00:00+00:00',
+                 '2026-11-15 12:00:00+00:00', json.dumps([f'file://{self.project}']), 1),
+            )
+
+        cfg = db.config()
+        cfg['antigravity_home'] = str(mock_agy)
+        db.write_private(db.DATA / 'config.json', json.dumps(cfg))
+
+        self.assertEqual(self.post('antigravity/sync').status_code, 200)
+        st = self.client.get('/api/state').json()
+        s = next(x for x in st['sessions'] if x.get('native_id') == 'conv-agy-stuck')
+        self.assertTrue(s['external_active'])
+
+        hub_calls = []
+
+        class FakeHub:
+            async def call(self, method, payload=None, timeout=10.0):
+                hub_calls.append((method, payload))
+                return {}
+
+        async def fake_discover(auto_launch=False):
+            return FakeHub()
+
+        with patch('workstation.antigravity_hub.discover_hub', side_effect=fake_discover):
+            stop_res = self.post(f"sessions/{s['id']}/stop")
+        self.assertEqual(stop_res.status_code, 200)
+        self.assertIn(('CancelCascadeInvocation', {'cascadeId': 'conv-agy-stuck'}), hub_calls)
+
+        # Even if conversation_summaries.db still has not_fully_idle=1, Rove must unblock immediately.
+        st2 = self.client.get('/api/state').json()
+        s2 = next(x for x in st2['sessions'] if x['id'] == s['id'])
+        self.assertFalse(s2['external_active'])
+
+        with patch('workstation.server.spawn'):
+            msg_res = self.post(f"sessions/{s['id']}/messages", {'text': '继续任务', 'request_id': secrets.token_hex(16)})
+        self.assertEqual(msg_res.status_code, 200, msg_res.text)
+        db.execute("UPDATE jobs SET status='completed', ended=? WHERE session_id=?", (time.time(), s['id']))
+
+        # If a brand-new external turn advances step_count later, external_active accurately reflects it again.
+        with contextlib.closing(sqlite3.connect(mock_agy / 'conversation_summaries.db')) as conn, conn:
+            conn.execute('UPDATE conversation_summaries SET step_count=6 WHERE conversation_id=?', ('conv-agy-stuck',))
+        st3 = self.client.get('/api/state').json()
+        s3 = next(x for x in st3['sessions'] if x['id'] == s['id'])
+        self.assertTrue(s3['external_active'])
+
+    def test_codex_stale_turn_without_lock_is_not_active_and_stop_unblocks_locked_turn(self):
+        from unittest.mock import patch
+
+        codex_dir, _, subrepo = self._setup_mock_codex_home()
+        rollout_path = codex_dir / 'sessions/2026/11/02/rollout-stale-or-locked.jsonl'
+        rollout_path.write_text(
+            json.dumps({'ordinal': 1, 'type': 'event_msg', 'payload': {'type': 'task_started', 'turn_id': 't-bg'}}) + '\n',
+            encoding='utf-8',
+        )
+        with contextlib.closing(sqlite3.connect(codex_dir / 'state_5.sqlite')) as sconn, sconn:
+            sconn.execute(
+                'INSERT INTO threads VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                ('tid-bg-stop', str(rollout_path), 1793600000, int(time.time()), 'vscode', 'user', 'Codex Desktop',
+                 None, str(subrepo), '后台残留会话', None, '', '', 0, 'gpt-6.1-sol', 'high', 0, 0, None),
+            )
+        with contextlib.closing(sqlite3.connect(codex_dir / 'thread_history_1.sqlite')) as tconn, tconn:
+            tconn.execute(
+                'INSERT INTO thread_turns VALUES(?,?,?,?,?,?)',
+                ('tid-bg-stop', 't-bg', 1, 'inProgress', 100, None),
+            )
+
+        # Without a writer lock, a stale inProgress turn must NOT block Rove.
+        st_unlocked = self.client.get('/api/state').json()
+        s_unlocked = next(x for x in st_unlocked['sessions'] if x.get('native_id') == 'tid-bg-stop')
+        self.assertFalse(s_unlocked['external_active'])
+
+        # With an active writer lock, external_active=True until user clicks Stop in Rove.
+        lock_file = codex_dir / 'thread-writer-locks/tid-bg-stop.lock'
+        lock_file.write_text('', encoding='utf-8')
+        fd = os.open(str(lock_file), os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            st_locked = self.client.get('/api/state').json()
+            s_locked = next(x for x in st_locked['sessions'] if x['id'] == s_unlocked['id'])
+            self.assertTrue(s_locked['external_active'])
+
+            stop_res = self.post(f"sessions/{s_unlocked['id']}/stop")
+            self.assertEqual(stop_res.status_code, 200)
+
+            st_after_stop = self.client.get('/api/state').json()
+            s_after_stop = next(x for x in st_after_stop['sessions'] if x['id'] == s_unlocked['id'])
+            self.assertFalse(s_after_stop['external_active'])
+
+            fake_bin = Path(self.temp.name) / 'fake-codex'
+            fake_bin.write_text('#!/bin/sh\n', encoding='utf-8')
+            cfg = db.config()
+            cfg['codex_bin'] = str(fake_bin)
+            db.write_private(db.DATA / 'config.json', json.dumps(cfg))
+
+            with patch('workstation.server.spawn'):
+                msg_res = self.post(f"sessions/{s_unlocked['id']}/messages", {'text': '停止后继续', 'request_id': secrets.token_hex(16)})
+            self.assertEqual(msg_res.status_code, 200, msg_res.text)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
 
 if __name__ == '__main__':
     unittest.main()

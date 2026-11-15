@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -30,6 +31,7 @@ from . import cloud_execution
 from . import cluster_sync
 from . import engines
 from . import codex_sync
+from . import antigravity_hub
 from . import antigravity_sync
 from . import quotas
 from . import webpush
@@ -838,7 +840,7 @@ async def send_message(ident: str, body: Prompt):
     if chosen_engine == 'codex' and native_codex_id and body.execution_target == 'local':
         local_live = db.one("SELECT 1 FROM jobs WHERE session_id=? AND status IN ('queued','running','waiting')", (ident,))
         if not local_live and await asyncio.to_thread(codex_sync.is_thread_locked, native_codex_id):
-            ext_running = await asyncio.to_thread(codex_sync.is_thread_running_externally, native_codex_id, s.get('rollout_path'))
+            ext_running = await asyncio.to_thread(codex_sync.is_thread_running_externally, native_codex_id, s.get('rollout_path'), None, s)
             if ext_running:
                 raise HTTPException(409, 'Mac 本机 Codex 正在执行此会话，请等待当前回合完成后继续')
 
@@ -977,8 +979,39 @@ async def get_media(path: str, session_id: str | None = None):
 
 @app.post('/api/sessions/{ident}/stop')
 async def stop(ident: str):
-    session(ident)
-    db.execute("UPDATE jobs SET stop=1 WHERE session_id=? AND status IN ('queued','running','waiting')", (ident,))
+    s = session(ident)
+    active_jobs = db.query(
+        "SELECT id, pid, stop FROM jobs WHERE session_id=? AND status IN ('queued','running','waiting')",
+        (ident,),
+    )
+    if active_jobs:
+        already_stopping = all(j.get('stop') for j in active_jobs)
+        db.execute("UPDATE jobs SET stop=1 WHERE session_id=? AND status IN ('queued','running','waiting')", (ident,))
+        await asyncio.to_thread(db.reconcile, 0.0)
+        if already_stopping:
+            for j in active_jobs:
+                pid = j.get('pid')
+                if pid and pid != os.getpid():
+                    with contextlib.suppress(OSError):
+                        os.kill(pid, signal.SIGTERM)
+            db.execute(
+                "UPDATE jobs SET status='stopped', ended=COALESCE(ended, ?), error=COALESCE(error, '已强制终止后台任务进程') "
+                "WHERE session_id=? AND status IN ('queued','running','waiting')",
+                (time.time(), ident),
+            )
+
+    cascade_id = db.get_antigravity_native_id(s)
+    if cascade_id:
+        hub = await antigravity_hub.discover_hub(auto_launch=False)
+        if hub is not None:
+            with contextlib.suppress(Exception):
+                await hub.call('CancelCascadeInvocation', {'cascadeId': cascade_id}, timeout=8.0)
+        await asyncio.to_thread(antigravity_sync.mark_external_stopped, ident, cascade_id)
+
+    codex_id = db.get_codex_native_id(s)
+    if codex_id and not active_jobs:
+        await asyncio.to_thread(codex_sync.mark_external_stopped, ident, codex_id, s.get('rollout_path'))
+
     return {'ok': True}
 
 
