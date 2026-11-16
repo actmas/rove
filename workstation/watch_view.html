@@ -228,6 +228,93 @@
       align-items: center;
       gap: 3px;
     }
+    .approval-card {
+      background: #14171f;
+      border: 1px solid rgba(245, 158, 11, 0.45);
+      border-radius: 12px;
+      padding: 9px 10px;
+      display: none;
+      flex-direction: column;
+      gap: 7px;
+      animation: fadeIn 0.18s ease-out;
+    }
+    .approval-card.visible {
+      display: flex;
+    }
+    .approval-title {
+      font-size: 11px;
+      font-weight: 700;
+      color: #fbbf24;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+    }
+    .approval-cmd {
+      background: #0a0c10;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 8px;
+      padding: 6px 7px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      line-height: 1.35;
+      color: #e5e7eb;
+      white-space: pre-wrap;
+      word-break: break-all;
+      max-height: 92px;
+      overflow-y: auto;
+    }
+    .approval-cwd {
+      font-size: 10px;
+      color: var(--muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .approval-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+    }
+    .watch-btn {
+      appearance: none;
+      border-radius: 9px;
+      padding: 8px 6px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      background: #1c202a;
+      color: #f3f4f6;
+      transition: transform 0.12s ease, opacity 0.12s ease, background-color 0.12s ease;
+    }
+    .watch-btn:active:not(:disabled) {
+      transform: scale(0.96);
+    }
+    .watch-btn:focus-visible {
+      outline: 2px solid #3b82f6;
+      outline-offset: 2px;
+    }
+    .watch-btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+    .watch-btn.accept {
+      background: #10b981;
+      border-color: rgba(16, 185, 129, 0.65);
+      color: #03150e;
+    }
+    .watch-btn.decline {
+      background: rgba(239, 68, 68, 0.14);
+      border-color: rgba(239, 68, 68, 0.45);
+      color: #fca5a5;
+    }
+    .approval-feedback {
+      font-size: 11px;
+      color: var(--muted);
+      text-align: center;
+      display: none;
+    }
   </style>
 </head>
 <body>
@@ -241,11 +328,25 @@
     </div>
     <div class="title-row">
       <h1 class="session-title" id="session-title">Rove 监控</h1>
-      <span class="lock-pill" title="只读监控模式，无法输入或触发任何修改">🔒 只读锁定</span>
+      <span class="lock-pill" title="支持实时进度监控与一键快速审批">⌚ Watch 审批</span>
     </div>
   </header>
 
   <main class="watch-content" id="content">
+    <section class="approval-card" id="watch-approval-card" aria-live="polite">
+      <div class="approval-title">
+        <span>⚠️ 等待你的审批</span>
+        <span id="watch-approval-badge">操作确认</span>
+      </div>
+      <div class="approval-cmd" id="watch-approval-cmd"></div>
+      <div class="approval-cwd" id="watch-approval-cwd"></div>
+      <div class="approval-actions" id="watch-approval-actions">
+        <button type="button" class="watch-btn accept" id="watch-btn-accept">✓ 批准执行</button>
+        <button type="button" class="watch-btn decline" id="watch-btn-decline">✕ 拒绝</button>
+      </div>
+      <div class="approval-feedback" id="watch-approval-feedback"></div>
+    </section>
+
     <div class="empty-state" id="empty-state">
       <div class="empty-icon">⏳</div>
       <div>正在连接 Mac mini…</div>
@@ -258,7 +359,7 @@
   </button>
 
   <footer class="safe-notice">
-    🛡️ 只读视窗 · 防误触保护
+    ⌚ Rove Watch · 实时监控与快速审批
   </footer>
 
   <script src="/watch/live.js"></script>

@@ -340,9 +340,11 @@ self.addEventListener('push', event => {
       tag: payload.tag || 'workstation-push',
       renotify: true,
       requireInteraction: Boolean(payload.requireInteraction),
+      actions: Array.isArray(payload.actions) ? payload.actions : [],
       data: {
         url: payload.url || (payload.sessionId ? `/?session=${encodeURIComponent(payload.sessionId)}` : '/'),
         sessionId: payload.sessionId || null,
+        approvalId: payload.approvalId || null,
         kind: payload.kind || 'info',
       },
     });
@@ -353,12 +355,30 @@ self.addEventListener('notificationclick', event => {
   event.notification.close();
   const data = event.notification.data || {};
   const sessionId = data.sessionId || null;
+  const approvalId = data.approvalId || null;
+  const action = event.action || '';
   const relUrl = data.url || (sessionId ? `/?session=${encodeURIComponent(sessionId)}` : '/');
   const targetUrl = new URL(relUrl, self.registration.scope).href;
 
   event.waitUntil((async () => {
     if (self.navigator && typeof self.navigator.clearAppBadge === 'function') {
       self.navigator.clearAppBadge().catch(() => {});
+    }
+    if ((action === 'accept' || action === 'decline') && approvalId) {
+      try {
+        const res = await fetch(`/api/approvals/${encodeURIComponent(approvalId)}`, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Workstation-Client': '1',
+          },
+          body: JSON.stringify({decision: action}),
+        });
+        if (res.ok) {
+          return;
+        }
+      } catch {}
     }
     const windowClients = await self.clients.matchAll({type: 'window', includeUncontrolled: true});
     for (const client of windowClients) {

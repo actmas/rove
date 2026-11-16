@@ -1360,6 +1360,8 @@ class WorkstationTests(unittest.TestCase):
             mock_notify.assert_awaited_once()
             approval_call = mock_notify.await_args.kwargs
             self.assertEqual(approval_call['kind'], 'approval')
+            self.assertEqual(approval_call['approval_id'], 'app-123')
+            self.assertEqual([a['action'] for a in approval_call['actions']], ['accept', 'decline'])
             self.assertTrue(approval_call['require_interaction'])
             self.assertIn('等待你的审批', approval_call['title'])
             self.assertIn('git push origin main', approval_call['body'])
@@ -1377,7 +1379,7 @@ class WorkstationTests(unittest.TestCase):
         from workstation import quotas
         quotas._CACHE.clear()
         try:
-            # 1. Deprecated approval and status endpoints return 410 Gone to prevent control risks
+            # 1. Deprecated GET approval and status endpoints return 410 Gone to prevent GET-based mutations
             res_status = self.client.get('/api/watch/status')
             self.assertEqual(res_status.status_code, 410)
             self.assertIn('永久下线注销', res_status.text)
@@ -1385,15 +1387,15 @@ class WorkstationTests(unittest.TestCase):
             res_approve_get = self.client.get('/api/watch/approve')
             self.assertEqual(res_approve_get.status_code, 410)
 
-            res_approve_post = self.client.post('/api/watch/approve')
-            self.assertEqual(res_approve_post.status_code, 410)
-
             # 2. Reject active endpoints without token or with invalid token
             res_no_token = self.client.get('/api/watch/quotas')
             self.assertEqual(res_no_token.status_code, 401)
 
             res_bad_token = self.client.get('/api/watch/quotas?token=wrong_token')
             self.assertEqual(res_bad_token.status_code, 401)
+
+            res_approve_no_tok = self.client.post('/api/watch/approve', json={'approval_id': 'x', 'decision': 'accept'})
+            self.assertEqual(res_approve_no_tok.status_code, 401)
 
             # 3. Authenticated user can fetch watch config and new token
             cfg_res = self.client.get('/api/watch/config')
@@ -1403,8 +1405,9 @@ class WorkstationTests(unittest.TestCase):
             self.assertTrue(bool(token))
             self.assertIn(token, cfg_data['quotas_url'])
             self.assertIn(token, cfg_data['live_url'])
+            self.assertIn(token, cfg_data['pending_url'])
+            self.assertIn(token, cfg_data['approve_url'])
             self.assertNotIn('status_url', cfg_data)
-            self.assertNotIn('approve_url', cfg_data)
 
             # 4. Query all models quotas endpoint
             quotas_res = self.client.get(f'/api/watch/quotas?token={token}')
@@ -1415,15 +1418,59 @@ class WorkstationTests(unittest.TestCase):
             self.assertEqual(quotas_json.status_code, 200)
             self.assertIn('antigravity', quotas_json.json())
 
-            # 5. Query read-only live watch page and state feed
+            # 5. Query live watch page and approval workflow
             live_page_res = self.client.get(f'/watch/live?token={token}')
             self.assertEqual(live_page_res.status_code, 200)
             self.assertIn('Rove Watch Live', live_page_res.text)
-            self.assertIn('只读监控', live_page_res.text)
+            self.assertIn('Watch 审批', live_page_res.text)
+            self.assertIn('watch-approval-card', live_page_res.text)
+
+            # Create a waiting job + pending approval and verify Watch pending + approve endpoints
+            p_res = self.post('projects', {'path': str(self.project)})
+            proj_id = p_res.json()['id']
+            s_res = self.post('sessions', {'project_id': proj_id, 'engine': 'codex'})
+            sid = s_res.json()['id']
+            jid = secrets.token_hex(12)
+            aid = secrets.token_hex(12)
+            now = time.time()
+            db.execute(
+                "INSERT INTO jobs(id,session_id,request_id,prompt,status,started,engine) VALUES(?,?,?,?,'waiting',?,'codex')",
+                (jid, sid, secrets.token_hex(8), 'run tests', now),
+            )
+            db.execute(
+                'INSERT INTO approvals VALUES(?,?,?,?,NULL,?)',
+                (aid, jid, 'item/commandExecution/requestApproval', json.dumps({'command': 'pytest -q'}), now),
+            )
+
+            pend_res = self.client.get(f'/api/watch/pending?token={token}')
+            self.assertEqual(pend_res.status_code, 200)
+            self.assertTrue(pend_res.json()['pending'])
+            self.assertEqual(pend_res.json()['approval']['id'], aid)
+            self.assertEqual(pend_res.json()['approval']['command'], 'pytest -q')
+
+            pend_txt = self.client.get(f'/api/watch/pending?token={token}&format=text')
+            self.assertEqual(pend_txt.status_code, 200)
+            self.assertIn('pytest -q', pend_txt.text)
 
             live_state_res = self.client.get(f'/api/watch/live/state?token={token}')
             self.assertEqual(live_state_res.status_code, 200)
             self.assertIn('session_title', live_state_res.json())
+            self.assertEqual(live_state_res.json()['approval']['id'], aid)
+
+            approve_res = self.client.post(
+                f'/api/watch/approve?token={token}',
+                json={'approval_id': aid, 'decision': 'accept'},
+            )
+            self.assertEqual(approve_res.status_code, 200)
+            self.assertTrue(approve_res.json()['ok'])
+            self.assertEqual(db.one('SELECT decision FROM approvals WHERE id=?', (aid,))['decision'], 'accept')
+
+            dup_res = self.client.post(
+                f'/api/watch/approve?token={token}',
+                json={'approval_id': aid, 'decision': 'decline'},
+            )
+            self.assertEqual(dup_res.status_code, 409)
+            db.execute("UPDATE jobs SET status='completed', ended=? WHERE id=?", (time.time(), jid))
 
             # 6. Eink View endpoints
             eink_page_res = self.client.get(f'/eink?token={token}')

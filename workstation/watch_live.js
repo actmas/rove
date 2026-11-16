@@ -15,6 +15,15 @@
   const contentBox = document.getElementById('content');
   const anchor = document.getElementById('anchor');
   const emptyState = document.getElementById('empty-state');
+  const approvalCard = document.getElementById('watch-approval-card');
+  const approvalCmd = document.getElementById('watch-approval-cmd');
+  const approvalCwd = document.getElementById('watch-approval-cwd');
+  const approvalActions = document.getElementById('watch-approval-actions');
+  const approvalFeedback = document.getElementById('watch-approval-feedback');
+  const btnAccept = document.getElementById('watch-btn-accept');
+  const btnDecline = document.getElementById('watch-btn-decline');
+  let activeApprovalId = '';
+  let approvalBusy = false;
 
   function formatTime(secs) {
     if (secs == null || isNaN(secs) || secs < 0) return '00:00';
@@ -228,6 +237,33 @@
         stopwatch.textContent = '--:--';
       }
 
+      if (approvalCard && data.approval && data.approval.id) {
+        const appr = data.approval;
+        const isNew = activeApprovalId !== appr.id;
+        activeApprovalId = appr.id;
+        approvalCard.classList.add('visible');
+        approvalCmd.textContent = appr.command || appr.reason || '请求执行操作';
+        approvalCwd.textContent = appr.cwd ? '目录: ' + appr.cwd : '';
+        approvalCwd.style.display = appr.cwd ? 'block' : 'none';
+        if (appr.is_question) {
+          approvalActions.style.display = 'none';
+          approvalFeedback.style.display = 'block';
+          approvalFeedback.textContent = '请在 iPhone 或网页端回答此交互问题';
+        } else if (!approvalBusy) {
+          approvalActions.style.display = 'grid';
+          approvalFeedback.style.display = 'none';
+          btnAccept.disabled = false;
+          btnDecline.disabled = false;
+        }
+        if (isNew) {
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+      } else if (approvalCard) {
+        activeApprovalId = '';
+        approvalBusy = false;
+        approvalCard.classList.remove('visible');
+      }
+
       if (data.events && data.events.length) {
         renderEvents(data.events);
       }
@@ -274,6 +310,37 @@
       watchScrollBtn.style.display = (!nearBottom && itemsMap.size > 2) ? 'inline-flex' : 'none';
     }, { passive: true });
   }
+
+  async function submitWatchDecision(decision) {
+    if (!activeApprovalId || approvalBusy) return;
+    approvalBusy = true;
+    btnAccept.disabled = true;
+    btnDecline.disabled = true;
+    approvalFeedback.style.display = 'block';
+    approvalFeedback.textContent = decision === 'accept' ? '正在提交批准…' : '正在提交拒绝…';
+    try {
+      const res = await fetch(`/api/watch/approve?token=${encodeURIComponent(token)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approval_id: activeApprovalId, decision })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || ('HTTP ' + res.status));
+      }
+      approvalFeedback.textContent = decision === 'accept' ? '✓ 已批准执行' : '✕ 已拒绝操作';
+      if (pollTimer) clearTimeout(pollTimer);
+      pollState();
+    } catch (err) {
+      approvalBusy = false;
+      btnAccept.disabled = false;
+      btnDecline.disabled = false;
+      approvalFeedback.textContent = '提交失败: ' + err.message;
+    }
+  }
+
+  if (btnAccept) btnAccept.addEventListener('click', () => submitWatchDecision('accept'));
+  if (btnDecline) btnDecline.addEventListener('click', () => submitWatchDecision('decline'));
 
   // Start polling and stopwatch ticker
   pollState();

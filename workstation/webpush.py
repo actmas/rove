@@ -613,6 +613,8 @@ async def notify_all(
     title: str,
     body: str,
     session_id: str | None = None,
+    approval_id: str | None = None,
+    actions: list[dict] | None = None,
     tag: str = 'workstation',
     kind: str = 'info',
     require_interaction: bool = False,
@@ -629,12 +631,16 @@ async def notify_all(
 
     vapid = ensure_vapid_keys()
     url = f'./?session={session_id}' if session_id else './'
+    if session_id and approval_id:
+        url = f'./?session={session_id}&approval={approval_id}'
     payload = {
         'title': title[:120],
         'body': body[:300],
         'tag': tag[:80],
         'url': url,
         'sessionId': session_id,
+        'approvalId': approval_id,
+        'actions': actions or [],
         'kind': kind,
         'requireInteraction': bool(require_interaction),
         'timestamp': int(time.time() * 1000),
@@ -700,10 +706,18 @@ async def notify_job_approval(session: dict, project: dict | None, approval_id: 
                 cmd = ' '.join(str(x) for x in cmd)
             title = f'等待你的审批 · {proj_name}'
             body = f'{sess_title}：{cmd}'
+        actions = None
+        if method != 'item/tool/requestUserInput':
+            actions = [
+                {'action': 'accept', 'title': '✓ 批准执行'},
+                {'action': 'decline', 'title': '✕ 拒绝'},
+            ]
         await notify_all(
             title=title,
             body=body,
             session_id=session.get('id'),
+            approval_id=approval_id,
+            actions=actions,
             tag=f'approval-{approval_id}',
             kind='approval',
             require_interaction=True,

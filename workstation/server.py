@@ -1674,11 +1674,93 @@ def verify_watch_token(token: str | None) -> bool:
     return hmac.compare_digest(token.strip(), expected)
 
 
+class WatchEinkDecision(BaseModel):
+    approval_id: str
+    decision: Literal['accept', 'decline', 'cancel']
+
+
+def _active_approval_for_job(active_job: dict | None) -> dict | None:
+    if not active_job or active_job.get('status') != 'waiting':
+        return None
+    appr = db.one(
+        "SELECT * FROM approvals WHERE job_id=? AND decision IS NULL ORDER BY created DESC LIMIT 1",
+        (active_job['id'],),
+    )
+    if not appr:
+        return None
+    try:
+        payload = json.loads(appr['payload']) if isinstance(appr['payload'], str) else (appr['payload'] or {})
+    except Exception:
+        payload = {}
+    cmd = payload.get('command') or payload.get('reason') or ''
+    if isinstance(cmd, list):
+        cmd = ' '.join(str(x) for x in cmd)
+    cwd = payload.get('cwd') or active_job.get('cwd') or ''
+    return {
+        'id': appr['id'],
+        'job_id': appr['job_id'],
+        'method': appr['method'],
+        'command': cmd,
+        'reason': payload.get('reason') or '',
+        'cwd': cwd,
+        'is_question': appr['method'] == 'item/tool/requestUserInput',
+        'created': appr['created'],
+    }
+
+
+def _commit_token_approval(approval_id: str, decision: str) -> dict:
+    value = db.one(
+        "SELECT a.*, j.session_id, j.status FROM approvals a JOIN jobs j ON j.id=a.job_id WHERE a.id=?",
+        (approval_id,),
+    )
+    if not value or value['status'] != 'waiting':
+        raise HTTPException(409, '审批已失效或任务已结束')
+    if value['decision'] is not None:
+        raise HTTPException(409, '该审批已被处理')
+    if value['method'] == 'item/tool/requestUserInput':
+        raise HTTPException(409, '请在 iPhone 或网页端回答此问题')
+    if not db.decide_approval(approval_id, decision):
+        raise HTTPException(409, '审批已处理或任务已结束')
+    return {'ok': True, 'approval_id': approval_id, 'decision': decision}
+
+
 @app.get('/api/watch/status')
 @app.get('/api/watch/approve')
-@app.post('/api/watch/approve')
 async def watch_deprecated_endpoints():
     raise HTTPException(410, '此接口及原快捷指令已永久下线注销，已消除所有审批与控制风险')
+
+
+@app.get('/api/watch/pending')
+async def watch_pending(token: str | None = None, format: str = 'json'):
+    if not verify_watch_token(token):
+        raise HTTPException(401, 'Token 无效或已过期')
+    active_job = db.one(
+        "SELECT j.*, s.title, s.cwd, s.engine FROM jobs j "
+        "JOIN sessions s ON s.id=j.session_id "
+        "WHERE j.status='waiting' ORDER BY j.started DESC LIMIT 1"
+    )
+    appr = _active_approval_for_job(active_job)
+    if format == 'text':
+        if not appr:
+            return Response(content='当前没有待审批操作', media_type='text/plain; charset=utf-8')
+        title = (active_job or {}).get('title') or '当前会话'
+        cmd = appr.get('command') or appr.get('reason') or '请求执行操作'
+        return Response(
+            content=f"待审批 · {title}\n操作：{cmd}\nID：{appr['id']}",
+            media_type='text/plain; charset=utf-8',
+        )
+    return {
+        'pending': bool(appr),
+        'session_title': (active_job or {}).get('title') if active_job else None,
+        'approval': appr,
+    }
+
+
+@app.post('/api/watch/approve')
+async def watch_approve(body: WatchEinkDecision, token: str | None = None):
+    if not verify_watch_token(token):
+        raise HTTPException(401, 'Token 无效或已过期')
+    return _commit_token_approval(body.approval_id, body.decision)
 
 
 @app.get('/api/watch/quotas')
@@ -1821,6 +1903,7 @@ async def watch_live_state(token: str | None = None, after: int = 0):
                 ev['payload'] = {}
             events_list.append(ev)
 
+    active_approval = _active_approval_for_job(active_job) if active_job else None
     return {
         'active': bool(active_job),
         'session_id': sid,
@@ -1830,6 +1913,7 @@ async def watch_live_state(token: str | None = None, after: int = 0):
         'last_job': last_job,
         'server_time': time.time(),
         'job': job_data,
+        'approval': active_approval,
         'events': events_list,
     }
 
@@ -1869,13 +1953,13 @@ async def watch_config(request: Request):
         'token': token,
         'quotas_url': f"{base_url}/api/watch/quotas?token={token}",
         'live_url': f"{base_url}/watch/live?token={token}",
+        'pending_url': f"{base_url}/api/watch/pending?token={token}",
+        'approve_url': f"{base_url}/api/watch/approve?token={token}",
         'eink_url': f"{base_url}/eink?token={token}",
     }
 
 
-class EinkDecision(BaseModel):
-    approval_id: str
-    decision: Literal['accept', 'decline', 'cancel']
+EinkDecision = WatchEinkDecision
 
 
 @app.get('/eink/live.js')
