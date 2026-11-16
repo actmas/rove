@@ -21,9 +21,11 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
+from . import account_pool
 from . import context_bridge
 from . import design_guard
 from . import memories
+from . import vision_bridge
 
 def validate_agent_base_url(url: str | None) -> str:
     cleaned = (url or '').strip().rstrip('/')
@@ -685,12 +687,28 @@ def set_session_native_agent_id(session_id: str, agent_id: str, native_id: str) 
     )
 
 
+def _model_supports_image(spec: Optional[Dict[str, Any]], model_id: Optional[str]) -> bool:
+    if not spec:
+        return True
+    models = spec.get('models') or []
+    if not models:
+        return True
+    target = next((m for m in models if isinstance(m, dict) and m.get('id') == model_id), None)
+    if target is None:
+        target = next((m for m in models if isinstance(m, dict) and m.get('isDefault')), models[0])
+    if isinstance(target, dict) and 'supportsImage' in target:
+        return bool(target['supportsImage'])
+    return True
+
+
 def _build_agent_prompt(
     agent_id: str,
     job: Dict[str, Any],
     session: Dict[str, Any],
     project: Dict[str, Any],
     images: List[Path],
+    spec: Optional[Dict[str, Any]] = None,
+    model_id: Optional[str] = None,
 ) -> str:
     prompt_text = job['prompt']
     handoff_ctx = context_bridge.build_handoff_context(
@@ -710,8 +728,17 @@ def _build_agent_prompt(
         parts.append(prompt_text)
         prompt_text = '\n\n'.join(parts)
     if images:
-        refs = '\n'.join(f'- {p}' for p in images)
-        prompt_text = f'{prompt_text}\n\n[附加本机图片文件]\n{refs}'
+        resolved_spec = spec if spec is not None else get_agent_spec(agent_id)
+        resolved_model = model_id or job.get('model') or session.get('model')
+        if _model_supports_image(resolved_spec, resolved_model):
+            refs = '\n'.join(f'- {p}' for p in images)
+            prompt_text = f'{prompt_text}\n\n[附加本机图片文件]\n{refs}'
+        else:
+            vision_desc = vision_bridge.describe_images_for_text_model(
+                images, focus_hint=job.get('prompt', '')
+            )
+            if vision_desc:
+                prompt_text = f'{prompt_text}\n\n{vision_desc}'
     return prompt_text
 
 
@@ -760,6 +787,7 @@ async def _run_cli_agent(
         cmd.extend(str(x) for x in mode_flags if x)
 
     env = os.environ.copy()
+    env.update(account_pool.resolve_account_env_for_session(session, agent_id))
     env['PATH'] = (
         f"{Path.home() / '.local/bin'}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:"
         + env.get('PATH', '')

@@ -4,7 +4,7 @@ import {
   ShieldCheck, Zap, ImagePlus, AtSign, X, FileCode, Sparkles,
   Cloud, Laptop, ExternalLink, Info,
 } from 'lucide-react';
-import {api, compressImageFile} from './api';
+import {api, post, compressImageFile} from './api';
 
 export default function Composer({
   sessionId = 'new', initialExecutionTarget = 'local', initialCloudEnvironment = '',
@@ -329,6 +329,26 @@ export default function Composer({
       return submit(e);
     }
     if ((!prompt.trim() && !images.length) || busy) return;
+    const trimmed = prompt.trim();
+    if (sessionId && sessionId !== 'new' && /^\/review(?:\s+([\s\S]*))?$/i.test(trimmed)) {
+      if (images.length) {
+        onError?.('/review 命令暂不支持同时附加图片');
+        return;
+      }
+      const focus = trimmed.replace(/^\/review\s*/i, '').trim();
+      try {
+        await post(`sessions/${sessionId}/review`, {engine, model, focus});
+        try { sessionStorage.removeItem(draftStorageKey); } catch {}
+        setPrompt('');
+        setMention(null);
+        if (localRef.current) {
+          localRef.current.style.height = '56px';
+        }
+      } catch (err) {
+        onError?.(err.message || '启动独立 /review 失败');
+      }
+      return;
+    }
     if (onSend) {
       if (cloud && engine !== 'codex' && !agentSpec?.builtin && agentSpec?.cloud_url) {
         window.open(agentSpec.cloud_url, '_blank', 'noopener,noreferrer');

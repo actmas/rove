@@ -38,6 +38,7 @@ For example, use Codex to analyze a bug, switch to Antigravity to continue imple
 - **Codex** connects through `codex app-server` JSON-RPC, with streamed events, approvals, questions, model discovery, quotas, and optional cloud task submission.
 - **Antigravity** connects to the locally available Connect-RPC Hub or the configured `agy` CLI. Model availability depends on the installed engine and account.
 - **Additional agents** include presets for Claude Code, Gemini CLI, Aider, OpenCode, and OpenAI-compatible HTTP providers such as Ollama, vLLM, DeepSeek, and OpenRouter.
+- **Reliability & Multi-Account Autonomy** adds quota-reset auto-continue, expiring-quota urgency routing, isolated multi-account pools (`CODEX_HOME` / `CLAUDE_CONFIG_DIR` with device-auth login), isolated read-only `/review` with untracked-file freshness checks, layered `ToolLoopGuard`, zero-trace secret handoffs (`0600` ephemeral IPC), session queuing/forking, vision-bridge translation for text-only models, HMAC-verified GitHub doorbell webhooks, and `rove-ui` semantic cards.
 
 Existing engine subscriptions retain their own limits. HTTP API providers may charge for usage.
 

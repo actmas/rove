@@ -329,7 +329,116 @@ def init():
             updated REAL NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_project_memories_proj ON project_memories(project_id, pinned DESC, updated DESC);
+        CREATE TABLE IF NOT EXISTS quota_waits(
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            job_id TEXT NOT NULL,
+            engine TEXT NOT NULL,
+            model TEXT,
+            prompt TEXT NOT NULL,
+            has_output INTEGER NOT NULL DEFAULT 0,
+            reset_at REAL NOT NULL,
+            resume_at REAL NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'waiting',
+            reason TEXT NOT NULL DEFAULT '',
+            created REAL NOT NULL,
+            updated REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_quota_waits_due ON quota_waits(status, resume_at);
+        CREATE TABLE IF NOT EXISTS reviews(
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            review_job_id TEXT,
+            reviewer_engine TEXT NOT NULL,
+            reviewer_model TEXT,
+            git_head TEXT NOT NULL DEFAULT '',
+            workspace_hash TEXT NOT NULL DEFAULT '',
+            focus TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'running',
+            findings_count INTEGER,
+            raw_output TEXT NOT NULL DEFAULT '',
+            applied INTEGER NOT NULL DEFAULT 0,
+            created REAL NOT NULL,
+            updated REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_reviews_session ON reviews(session_id, created DESC);
+        CREATE TABLE IF NOT EXISTS secret_handoffs(
+            id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            purpose TEXT NOT NULL DEFAULT '',
+            origin_label TEXT NOT NULL DEFAULT '',
+            fields_json TEXT NOT NULL DEFAULT '[]',
+            status TEXT NOT NULL DEFAULT 'pending',
+            steps INTEGER NOT NULL DEFAULT 0,
+            created REAL NOT NULL,
+            updated REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_secret_handoffs_job ON secret_handoffs(job_id, status);
+        CREATE TABLE IF NOT EXISTS subscription_accounts(
+            id TEXT PRIMARY KEY,
+            engine TEXT NOT NULL,
+            label TEXT NOT NULL,
+            home_dir TEXT NOT NULL,
+            paused INTEGER NOT NULL DEFAULT 0,
+            priority INTEGER NOT NULL DEFAULT 0,
+            created REAL NOT NULL,
+            updated REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_sub_accounts_engine ON subscription_accounts(engine, paused, priority);
+        CREATE TABLE IF NOT EXISTS session_queue(
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            prompt TEXT NOT NULL,
+            engine TEXT,
+            model TEXT,
+            effort TEXT,
+            mode TEXT,
+            fast INTEGER,
+            images TEXT NOT NULL DEFAULT '[]',
+            steer INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created REAL NOT NULL,
+            updated REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_queue_sess ON session_queue(session_id, status, steer DESC, created ASC);
+        CREATE TABLE IF NOT EXISTS worktree_recycle_journal(
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            worktree_path TEXT NOT NULL,
+            branch TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'waiting',
+            reason TEXT NOT NULL DEFAULT '',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            created REAL NOT NULL,
+            updated REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS webhook_deliveries(
+            delivery_id TEXT PRIMARY KEY,
+            repo TEXT NOT NULL DEFAULT '',
+            event TEXT NOT NULL DEFAULT '',
+            received_at REAL NOT NULL
+        );
         ''')
+        _ensure_columns(db, 'project_memories', {
+            'why': "TEXT NOT NULL DEFAULT ''",
+            'how_to_apply': "TEXT NOT NULL DEFAULT ''",
+        })
+        _ensure_columns(db, 'sessions', {
+            'pending_runtime_json': "TEXT NOT NULL DEFAULT '{}'",
+            'runtime_generation': 'INTEGER NOT NULL DEFAULT 1',
+            'parent_session_id': 'TEXT',
+            'forked_at_job_id': 'TEXT',
+            'account_id': 'TEXT',
+        })
+        with contextlib.suppress(sqlite3.OperationalError):
+            db.execute(
+                'CREATE VIRTUAL TABLE IF NOT EXISTS project_memories_fts '
+                'USING fts5(memory_id UNINDEXED, project_id UNINDEXED, category, content, why, how_to_apply)'
+            )
         _ensure_columns(db, 'sessions', {
             'execution_target': "TEXT NOT NULL DEFAULT 'local'",
             'cloud_environment': "TEXT NOT NULL DEFAULT ''",

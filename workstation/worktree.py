@@ -298,3 +298,77 @@ def list_project_worktrees(project: Dict[str, Any]) -> List[Dict[str, Any]]:
             'session_title': matched_session['title'] if matched_session else None,
         })
     return results
+
+
+def _record_recycle_journal(
+    session_id: str,
+    project_id: str,
+    worktree_path: str,
+    branch: str,
+    status: str,
+    reason: str,
+) -> Dict[str, Any]:
+    import secrets
+    import time
+
+    now = time.time()
+    existing = db.one(
+        'SELECT * FROM worktree_recycle_journal WHERE session_id=? AND worktree_path=?',
+        (session_id, worktree_path),
+    )
+    if existing:
+        db.execute(
+            'UPDATE worktree_recycle_journal SET status=?, reason=?, attempts=attempts+1, updated=? WHERE id=?',
+            (status, reason, now, existing['id']),
+        )
+        return db.one('SELECT * FROM worktree_recycle_journal WHERE id=?', (existing['id'],))
+    ident = secrets.token_hex(8)
+    db.execute(
+        'INSERT INTO worktree_recycle_journal(id, session_id, project_id, worktree_path, branch, status, reason, attempts, created, updated) '
+        'VALUES(?,?,?,?,?,?,?,?,?,?)',
+        (ident, session_id, project_id, worktree_path, branch, status, reason, 1, now, now),
+    )
+    return db.one('SELECT * FROM worktree_recycle_journal WHERE id=?', (ident,))
+
+
+def safe_recycle_worktree(project: Dict[str, Any], session: Dict[str, Any]) -> Dict[str, Any]:
+    """Safely recycle a session worktree only if there are no active references or dirty changes."""
+    wt_path = session.get('worktree_path') or ''
+    branch = session.get('git_branch') or f"rove/{session['id'][:8]}"
+    if not wt_path:
+        return {'status': 'none', 'reason': 'no_worktree'}
+
+    # 1. Check active jobs or terminals
+    active_job = db.one(
+        "SELECT id FROM jobs WHERE session_id=? AND status IN ('queued','running','waiting') LIMIT 1",
+        (session['id'],),
+    )
+    if active_job:
+        return _record_recycle_journal(session['id'], project['id'], wt_path, branch, 'waiting', 'active_job_running')
+
+    # 2. Check dirty uncommitted files in worktree
+    wt_dir = Path(wt_path)
+    if wt_dir.is_dir():
+        st = _run_git(['status', '--porcelain'], cwd=str(wt_dir), check=False)
+        if st.returncode == 0 and st.stdout.strip():
+            return _record_recycle_journal(session['id'], project['id'], wt_path, branch, 'waiting', 'uncommitted_changes')
+
+    # 3. Clean -> remove safely
+    try:
+        remove_session_worktree(project, session, delete_branch=True)
+        return _record_recycle_journal(session['id'], project['id'], wt_path, branch, 'removed', 'clean_recycled')
+    except Exception as exc:
+        return _record_recycle_journal(session['id'], project['id'], wt_path, branch, 'paused', str(exc)[:240])
+
+
+def list_recycle_journal() -> List[Dict[str, Any]]:
+    return db.query('SELECT * FROM worktree_recycle_journal ORDER BY updated DESC LIMIT 100')
+
+
+def mark_recycle_kept(journal_id: str) -> Optional[Dict[str, Any]]:
+    import time
+    row = db.one('SELECT * FROM worktree_recycle_journal WHERE id=?', (journal_id,))
+    if not row:
+        return None
+    db.execute("UPDATE worktree_recycle_journal SET status='kept', reason='user_kept', updated=? WHERE id=?", (time.time(), journal_id))
+    return db.one('SELECT * FROM worktree_recycle_journal WHERE id=?', (journal_id,))

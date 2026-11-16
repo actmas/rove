@@ -359,3 +359,113 @@ def build_handoff_context(
     ])
 
     return '\n'.join(lines)
+
+
+_OVERFLOW_PATTERNS = (
+    re.compile(r'context[_\s-]*(?:length|window)[_\s-]*(?:exceeded|full|limit)', re.IGNORECASE),
+    re.compile(r'maximum\s+context\s+length', re.IGNORECASE),
+    re.compile(r'prompt\s+is\s+too\s+long', re.IGNORECASE),
+    re.compile(r'too\s+many\s+tokens', re.IGNORECASE),
+    re.compile(r'compact(?:ion)?\s+failed|invalid_encrypted_content', re.IGNORECASE),
+)
+
+
+def is_context_overflow_error(error_text: str) -> bool:
+    """Return True if an upstream error indicates context window exhaustion or compact failure."""
+    if not error_text:
+        return False
+    return any(pat.search(error_text) for pat in _OVERFLOW_PATTERNS)
+
+
+def has_turn_side_effects(session_id: str, job_id: str) -> bool:
+    """Fail-closed check: return True if a job produced assistant output, file changes, or commands."""
+    rows = db.query(
+        'SELECT kind, payload FROM events WHERE session_id=? AND job_id=?',
+        (session_id, job_id),
+    )
+    for row in rows:
+        kind = row.get('kind')
+        if kind in ('user', 'notice', 'error'):
+            continue
+        try:
+            payload = json.loads(row.get('payload') or '{}')
+        except Exception:
+            return True
+        if kind == 'codex':
+            method = payload.get('method') or ''
+            item = (payload.get('params') or {}).get('item') or {}
+            if method in ('item/agentMessage/delta', 'item/completed') and item.get('type') != 'userMessage':
+                return True
+            if item.get('type') in ('fileChange', 'commandExecution', 'mcpToolCall'):
+                return True
+        elif kind == 'antigravity':
+            if payload.get('event') == 'agy_step' and payload.get('step_kind') in ('agent', 'change', 'command'):
+                return True
+            if payload.get('event') == 'result':
+                return True
+        else:
+            return True
+    return False
+
+
+def build_rollover_context(
+    session: Dict[str, Any],
+    project: Dict[str, Any],
+    engine: str,
+    max_history_turns: int = 4,
+    max_reply_chars: int = 900,
+    exclude_job_id: Optional[str] = None,
+) -> str:
+    """Synthesize a same-engine rollover handoff block when native context window overflows."""
+    session_id = session.get('id')
+    if not session_id:
+        return ''
+    raw_turns = extract_session_turns(session_id, exclude_job_id=exclude_job_id)
+    turns = _substantive_turns(raw_turns)
+    if not turns:
+        return ''
+
+    proj_path = str(project.get('path') or '')
+    all_files: Set[str] = set()
+    for t in turns:
+        for f in t['files']:
+            norm = _normalize_rel_path(f, proj_path)
+            if norm:
+                all_files.add(norm)
+
+    valid = [t for t in turns if t.get('prompt') or t.get('reply')]
+    recent = valid[-max_history_turns:]
+    anchor = valid[0] if len(valid) > max_history_turns else None
+
+    lines: List[str] = [
+        BRIDGE_START_TAG,
+        f'# [上下文满窗自动换窗交接 ({engine.upper()})]',
+        f'- **项目**: `{project.get("name", "当前项目")}`',
+        '',
+        '### 1. 任务目标与近期轮次',
+    ]
+    if anchor and anchor.get('prompt'):
+        lines.append(f"- [首轮总目标]: {anchor['prompt'].replace(chr(10), ' ').strip()[:160]}")
+    for idx, t in enumerate(recent, 1):
+        lines.append(f"- 轮次 #{idx}: {t.get('prompt', '').replace(chr(10), ' ').strip()[:140]}")
+
+    last_reply_turn = next((t for t in reversed(recent) if t.get('reply')), None)
+    if last_reply_turn and last_reply_turn.get('reply'):
+        lines.extend([
+            '',
+            '### 2. 上一窗口最新进展',
+            _compress_reply_for_handoff(last_reply_turn['reply'], max_chars=max_reply_chars),
+        ])
+
+    if all_files:
+        lines.extend(['', f'### 3. 已修改文件清单（共 {len(all_files)} 个）'])
+        for fpath in sorted(all_files)[:12]:
+            lines.append(f'- `{fpath}`')
+
+    lines.extend([
+        '',
+        '### 4. 续接要求',
+        '原原生上下文窗口已满，系统已为你开启全新窗口并静默注入上述核心状态。请直接读取本地文件继续响应用户指令。',
+        BRIDGE_END_TAG,
+    ])
+    return '\n'.join(lines)

@@ -102,6 +102,38 @@ def get_target_receive_id(cfg: Dict[str, Any]) -> Optional[tuple[str, str]]:
     return None
 
 
+def describe_permission_action(method: str, params: Dict[str, Any]) -> str:
+    """Translate raw approval RPC method & params into a clear human-readable summary."""
+    if method == 'item/tool/requestUserInput':
+        questions = params.get('questions') or []
+        first_q = (questions[0].get('question') if questions and isinstance(questions[0], dict) else '') or '请回答交互问题'
+        return f"交互提问：{first_q}"
+    if method in ('item/commandExecution/requestApproval', 'execCommandApproval'):
+        cmd = params.get('command') or params.get('parsedCmd') or ''
+        if isinstance(cmd, list):
+            cmd = ' '.join(str(x) for x in cmd)
+        cwd = params.get('cwd') or ''
+        reason = params.get('reason') or ''
+        summary = f"准备执行命令：`{str(cmd).strip() or 'shell'}`"
+        if cwd:
+            summary += f"\n工作目录：`{cwd}`"
+        if reason:
+            summary += f"\n原因：{reason}"
+        return summary
+    if method in ('item/fileChange/requestApproval', 'applyPatchApproval'):
+        changes = params.get('changes') or params.get('files') or []
+        paths = [str(c.get('path') or c) for c in changes[:5]] if isinstance(changes, list) else []
+        if paths:
+            extra = f" 等共 {len(changes)} 个文件" if len(changes) > 5 else f"（共 {len(changes)} 个文件）"
+            return "准备修改文件：" + ', '.join(f'`{p}`' for p in paths) + extra
+        return f"准备修改工作区文件：{params.get('reason') or '请确认变更权限'}"
+    if method == 'item/permissions/requestApproval':
+        perms = params.get('permissions') or {}
+        return f"申请会话级权限扩展：{json.dumps(perms, ensure_ascii=False)[:240]}"
+    cmd = params.get('command') or params.get('reason') or method or '请求执行操作'
+    return f"待确认操作：\n`{cmd}`"
+
+
 async def send_approval_notification(
     session: Dict[str, Any],
     project: Optional[Dict[str, Any]],
@@ -127,17 +159,8 @@ async def send_approval_notification(
         f"🚨【Rove 工作台 · 任务待审批】",
         f"项目：{proj_name}",
         f"会话：{sess_title}",
+        describe_permission_action(method, params),
     ]
-
-    if method == 'item/tool/requestUserInput':
-        questions = params.get('questions') or []
-        first_q = (questions[0].get('question') if questions and isinstance(questions[0], dict) else '') or '请回答交互问题'
-        lines.append(f"提问：{first_q}")
-    else:
-        cmd = params.get('command') or params.get('reason') or params.get('method') or '请求执行操作'
-        if isinstance(cmd, list):
-            cmd = ' '.join(str(x) for x in cmd)
-        lines.append(f"待执行命令/操作：\n`{cmd}`")
 
     lines.append("")
     lines.append("⚡ 快捷审批指令（直接回复此机器人）：")

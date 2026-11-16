@@ -7382,3 +7382,169 @@ pre {
   border-radius: 999px;
   cursor: pointer;
 }
+
+/* ============================================================================
+   Rove UI Composable Rich Answers (Anti-AI-Slop Semantic Tokens)
+   ============================================================================ */
+.rove-ui-root {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 8px 0;
+}
+
+.rove-ui-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rove-ui-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+
+.rove-ui-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rove-ui-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.rove-ui-stat {
+  flex: 1 1 120px;
+  min-width: 0;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rove-ui-stat-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.rove-ui-stat-value {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.rove-ui-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid var(--border);
+  background: var(--bg-subtle);
+  color: var(--text);
+}
+
+.rove-ui-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rove-ui-bar-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.rove-ui-bar-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--surface-active);
+  overflow: hidden;
+}
+
+.rove-ui-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 180ms ease;
+}
+
+.rove-ui-btn {
+  align-self: flex-start;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 150ms ease, transform 120ms ease;
+}
+
+.rove-ui-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.rove-ui-btn:active:not(:disabled) {
+  transform: scale(0.98);
+  background: var(--surface-active);
+}
+
+.rove-ui-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.rove-ui-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.rove-ui-divider {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 4px 0;
+}
+
+.rove-ui-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.rove-ui-tone-primary { color: var(--text); }
+.rove-ui-tone-secondary { color: var(--text-secondary); }
+.rove-ui-tone-tertiary { color: var(--muted); }
+.rove-ui-tone-success { color: var(--emerald); }
+.rove-ui-tone-warning { color: var(--amber); }
+.rove-ui-tone-danger { color: var(--danger); }
+.rove-ui-bar-fill.rove-ui-tone-success { background: var(--emerald); }
+.rove-ui-bar-fill.rove-ui-tone-warning { background: var(--amber); }
+.rove-ui-bar-fill.rove-ui-tone-danger { background: var(--danger); }
+
+@media (max-width: 520px) {
+  .rove-ui-row {
+    flex-direction: column;
+  }
+}
+
+.rove-file-chip {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}

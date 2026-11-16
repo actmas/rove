@@ -13,15 +13,33 @@ export {parseEvents} from './eventParser';
 import Composer from './Composer';
 import SessionQuota from './SessionQuota';
 import CloudTaskCard from './CloudTaskCard';
+import RichUiBlock from './RichUiBlock';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   api, post, activeStates, uploadUrl, effortBadge, modeBadge, base,
 } from './api';
 
-function SafeMarkdown({children, components}) {
+function SafeMarkdown({children, components, onSend}) {
+  const mergedComponents = useMemo(() => {
+    const baseCode = components?.code;
+    return {
+      ...components,
+      code({className, children: codeChildren, ...props}) {
+        const match = /language-rove-ui\b/.test(className || '');
+        if (match) {
+          return <RichUiBlock source={String(codeChildren || '')} onSend={onSend}/>;
+        }
+        if (baseCode) {
+          return baseCode({className, children: codeChildren, ...props});
+        }
+        return <code className={className} {...props}>{codeChildren}</code>;
+      },
+    };
+  }, [components, onSend]);
+
   return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={mergedComponents}>
       {children}
     </ReactMarkdown>
   );
@@ -76,13 +94,22 @@ function Approval({approval, onDone, onError}) {
   const [busy, setBusy] = useState(false);
   const [answers, setAnswers] = useState({});
   if (approval.method === 'item/tool/requestUserInput') {
+    const hasSecret = approval.payload.questions.some(q => q.isSecret);
     async function answer(e) {
       e.preventDefault();
       setBusy(true);
       try {
-        await post(`approvals/${approval.id}/answers`, {
-          answers: Object.fromEntries(Object.entries(answers).map(([k, v]) => [k, Array.isArray(v) ? v : [v]])),
-        });
+        if (hasSecret) {
+          await post(`approvals/${approval.id}/secret`, {
+            answers: Object.fromEntries(
+              Object.entries(answers).map(([k, v]) => [k, Array.isArray(v) ? v.join(',') : String(v || '')])
+            ),
+          });
+        } else {
+          await post(`approvals/${approval.id}/answers`, {
+            answers: Object.fromEntries(Object.entries(answers).map(([k, v]) => [k, Array.isArray(v) ? v : [v]])),
+          });
+        }
         onDone();
       } catch (err) {
         onError(err.message);
@@ -92,12 +119,22 @@ function Approval({approval, onDone, onError}) {
     }
     return (
       <form className="approval approval-question" onSubmit={answer}>
-        <h3><span className="card-icon tone-blue"><MessageCircle size={14}/></span>需要你的回答</h3>
+        <h3>
+          <span className="card-icon tone-blue"><MessageCircle size={14}/></span>
+          {hasSecret ? '零留痕保密代输入（仅送达宿主内存，不落库）' : '需要你的回答'}
+        </h3>
         {approval.payload.questions.map(q => (
           <label className="question" key={q.id}>
             <span>{q.question}</span>
             {q.isSecret ? (
-              <p>此项包含敏感凭据，请在 Mac 原生客户端输入。</p>
+              <input
+                type="password"
+                autoComplete="off"
+                required
+                placeholder="输入保密凭据（提交后立即从内存擦除）…"
+                value={answers[q.id] || ''}
+                onChange={e => setAnswers(v => ({...v, [q.id]: e.target.value}))}
+              />
             ) : q.options?.length ? (
               <select
                 multiple={!!q.isMultiSelect}
@@ -124,8 +161,8 @@ function Approval({approval, onDone, onError}) {
           </label>
         ))}
         <div className="button-row">
-          <button className="primary" disabled={busy || approval.payload.questions.some(q => q.isSecret)}>
-            提交回答
+          <button className="primary" disabled={busy}>
+            {hasSecret ? '安全提交' : '提交回答'}
           </button>
         </div>
       </form>
@@ -257,9 +294,31 @@ const ImageMessageItem = memo(function ImageMessageItem({item}) {
   );
 });
 
+const PRECISE_PATH_RE = /^(?:\/[^\s/][^\s]*|[^\s]+\/$|(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,10}(?::\d+(?::\d+)?)?)$/;
+const FALSE_PATH_WORDS = new Set(['and/or', 'text/plain', 'text/html', 'application/json', 'n/a', 'read/write', 'true/false']);
+
+export function isPreciseFilePath(raw) {
+  const text = String(raw || '').trim();
+  if (!text || text.length > 260 || /\s/.test(text)) return false;
+  if (FALSE_PATH_WORDS.has(text.toLowerCase())) return false;
+  if (/^https?:\/\//i.test(text)) return false;
+  return PRECISE_PATH_RE.test(text);
+}
+
 const markdownComponents = {
   pre: CodeBlock,
   a: ({children, ...props}) => <a {...props} target="_blank" rel="noreferrer">{children}</a>,
+  code: ({inline, className, children, ...props}) => {
+    const raw = String(children || '').trim();
+    if ((inline || !className) && isPreciseFilePath(raw)) {
+      return (
+        <code className="rove-file-chip" title={`文件路径: ${raw}`} {...props}>
+          {children}
+        </code>
+      );
+    }
+    return <code className={className} {...props}>{children}</code>;
+  },
   img: RenderedImage,
 };
 

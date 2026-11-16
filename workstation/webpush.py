@@ -447,7 +447,11 @@ def build_vapid_authorization(endpoint: str, vapid: dict | None = None) -> str:
     keys = vapid or ensure_vapid_keys()
     parsed = urlparse(endpoint)
     audience = f'{parsed.scheme}://{parsed.netloc}'
-    subject = db.config().get('vapid_subject') or os.environ.get('ROVE_VAPID_SUBJECT') or 'mailto:admin@localhost'
+    pub_url = str(db.config().get('public_base_url') or '').strip()
+    default_sub = pub_url if pub_url.startswith('https://') else 'mailto:noreply@rove.app'
+    subject = db.config().get('vapid_subject') or os.environ.get('ROVE_VAPID_SUBJECT') or default_sub
+    if subject == 'mailto:admin@localhost':
+        subject = default_sub
 
     header_b64 = b64url_encode(json.dumps({'typ': 'JWT', 'alg': 'ES256'}, separators=(',', ':')).encode())
     claims_b64 = b64url_encode(json.dumps({

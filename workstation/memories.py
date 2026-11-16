@@ -40,12 +40,42 @@ def get_memory(memory_id: str) -> Optional[Dict[str, Any]]:
     return db.one('SELECT * FROM project_memories WHERE id=?', (memory_id,))
 
 
+def _sync_fts_upsert(mem: Optional[Dict[str, Any]]) -> None:
+    if not mem:
+        return
+    try:
+        db.execute('DELETE FROM project_memories_fts WHERE memory_id=?', (mem['id'],))
+        db.execute(
+            'INSERT INTO project_memories_fts(memory_id, project_id, category, content, why, how_to_apply) '
+            'VALUES(?,?,?,?,?,?)',
+            (
+                mem['id'],
+                mem['project_id'],
+                mem.get('category') or '',
+                mem.get('content') or '',
+                mem.get('why') or '',
+                mem.get('how_to_apply') or '',
+            ),
+        )
+    except Exception:
+        pass
+
+
+def _sync_fts_delete(memory_id: str) -> None:
+    try:
+        db.execute('DELETE FROM project_memories_fts WHERE memory_id=?', (memory_id,))
+    except Exception:
+        pass
+
+
 def add_memory(
     project_id: str,
     content: str,
     category: str = 'convention',
     source_session_id: Optional[str] = None,
     pinned: bool = False,
+    why: str = '',
+    how_to_apply: str = '',
 ) -> Dict[str, Any]:
     clean_content = content.strip()
     if not clean_content:
@@ -61,18 +91,25 @@ def add_memory(
     now = time.time()
     if existing:
         db.execute(
-            'UPDATE project_memories SET category=?, pinned=MAX(pinned, ?), updated=? WHERE id=?',
-            (category, 1 if pinned else 0, now, existing['id']),
+            'UPDATE project_memories SET category=?, pinned=MAX(pinned, ?), '
+            'why=CASE WHEN ?!="" THEN ? ELSE why END, '
+            'how_to_apply=CASE WHEN ?!="" THEN ? ELSE how_to_apply END, '
+            'updated=? WHERE id=?',
+            (category, 1 if pinned else 0, why.strip(), why.strip(), how_to_apply.strip(), how_to_apply.strip(), now, existing['id']),
         )
-        return get_memory(existing['id'])
+        mem = get_memory(existing['id'])
+        _sync_fts_upsert(mem)
+        return mem
 
     ident = secrets.token_hex(10)
     db.execute(
-        'INSERT INTO project_memories(id, project_id, category, content, source_session_id, pinned, created, updated) '
-        'VALUES(?,?,?,?,?,?,?,?)',
-        (ident, project_id, category, clean_content, source_session_id, 1 if pinned else 0, now, now),
+        'INSERT INTO project_memories(id, project_id, category, content, source_session_id, pinned, why, how_to_apply, created, updated) '
+        'VALUES(?,?,?,?,?,?,?,?,?,?)',
+        (ident, project_id, category, clean_content, source_session_id, 1 if pinned else 0, why.strip(), how_to_apply.strip(), now, now),
     )
-    return get_memory(ident)
+    mem = get_memory(ident)
+    _sync_fts_upsert(mem)
+    return mem
 
 
 def update_memory(
@@ -80,6 +117,8 @@ def update_memory(
     content: Optional[str] = None,
     category: Optional[str] = None,
     pinned: Optional[bool] = None,
+    why: Optional[str] = None,
+    how_to_apply: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     mem = get_memory(memory_id)
     if not mem:
@@ -105,6 +144,14 @@ def update_memory(
         updates.append('pinned=?')
         args.append(1 if pinned else 0)
 
+    if why is not None:
+        updates.append('why=?')
+        args.append(why.strip())
+
+    if how_to_apply is not None:
+        updates.append('how_to_apply=?')
+        args.append(how_to_apply.strip())
+
     if not updates:
         return mem
 
@@ -113,7 +160,9 @@ def update_memory(
     args.append(memory_id)
 
     db.execute(f"UPDATE project_memories SET {', '.join(updates)} WHERE id=?", tuple(args))
-    return get_memory(memory_id)
+    updated_mem = get_memory(memory_id)
+    _sync_fts_upsert(updated_mem)
+    return updated_mem
 
 
 def delete_memory(memory_id: str) -> bool:
@@ -121,7 +170,77 @@ def delete_memory(memory_id: str) -> bool:
     if not count_before:
         return False
     db.execute('DELETE FROM project_memories WHERE id=?', (memory_id,))
+    _sync_fts_delete(memory_id)
     return True
+
+
+def search_memories(project_id: str, query_text: str, limit: int = 8) -> List[Dict[str, Any]]:
+    """Search project memories using SQLite FTS5 BM25 ranking with LIKE fallback."""
+    q = (query_text or '').strip()
+    if not q:
+        return list_memories(project_id)[:limit]
+    # Ensure index is populated for any pre-existing rows
+    try:
+        fts_count = (db.one('SELECT count(*) AS c FROM project_memories_fts WHERE project_id=?', (project_id,)) or {}).get('c', 0)
+        mem_count = (db.one('SELECT count(*) AS c FROM project_memories WHERE project_id=?', (project_id,)) or {}).get('c', 0)
+        if mem_count > 0 and fts_count == 0:
+            for row in list_memories(project_id):
+                _sync_fts_upsert(row)
+        tokens = [t for t in re.findall(r'[\w\u4e00-\u9fff]+', q) if t]
+        if tokens:
+            fts_query = ' OR '.join(f'"{t}"' for t in tokens[:8])
+            rows = db.query(
+                'SELECT m.* FROM project_memories_fts f '
+                'JOIN project_memories m ON m.id = f.memory_id '
+                'WHERE f.project_id=? AND project_memories_fts MATCH ? '
+                'ORDER BY m.pinned DESC, bm25(project_memories_fts) ASC, m.updated DESC LIMIT ?',
+                (project_id, fts_query, limit),
+            )
+            if rows:
+                return rows
+    except Exception:
+        pass
+    like = f'%{q}%'
+    return db.query(
+        'SELECT * FROM project_memories WHERE project_id=? '
+        'AND (content LIKE ? OR why LIKE ? OR how_to_apply LIKE ?) '
+        'ORDER BY pinned DESC, updated DESC LIMIT ?',
+        (project_id, like, like, like, limit),
+    )
+
+
+def consolidate_memories(
+    project_id: str,
+    source_ids: List[str],
+    target_content: str,
+    category: str = 'convention',
+    why: str = '',
+    how_to_apply: str = '',
+    pinned: bool = False,
+) -> Dict[str, Any]:
+    """Atomically merge multiple redundant memories into a single consolidated entry."""
+    clean = (target_content or '').strip()
+    if not clean:
+        raise ValueError('合并后的记忆内容不能为空')
+    if category not in CATEGORIES:
+        category = 'convention'
+    now = time.time()
+    ident = secrets.token_hex(10)
+    with db.transaction() as conn:
+        for sid in source_ids:
+            conn.execute('DELETE FROM project_memories WHERE id=? AND project_id=?', (sid, project_id))
+            try:
+                conn.execute('DELETE FROM project_memories_fts WHERE memory_id=?', (sid,))
+            except Exception:
+                pass
+        conn.execute(
+            'INSERT INTO project_memories(id, project_id, category, content, source_session_id, pinned, why, how_to_apply, created, updated) '
+            'VALUES(?,?,?,?,?,?,?,?,?,?)',
+            (ident, project_id, category, clean, None, 1 if pinned else 0, why.strip(), how_to_apply.strip(), now, now),
+        )
+    mem = get_memory(ident)
+    _sync_fts_upsert(mem)
+    return mem
 
 
 def build_memory_context(project_id: str, max_items: int = 8, max_chars: int = 900) -> str:

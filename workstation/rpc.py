@@ -7,15 +7,17 @@ import signal
 
 class CodexRPC:
     """One task owns one official app-server. Close after each turn to release desktop locks."""
-    def __init__(self, binary, notify, request):
-        self.binary, self.notify, self.request = binary, notify, request
+    def __init__(self, binary, notify, request, env=None):
+        self.binary, self.notify, self.request, self.env = binary, notify, request, env
         self.pending, self.counter, self.handlers = {}, 0, set()
 
     async def start(self):
+        proc_env = {**os.environ, **self.env} if self.env else None
         self.proc = await asyncio.create_subprocess_exec(
             self.binary, 'app-server', '--listen', 'stdio://',
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL, start_new_session=True, limit=16 * 1024 * 1024)
+            stderr=asyncio.subprocess.DEVNULL, start_new_session=True, limit=16 * 1024 * 1024,
+            env=proc_env)
         self.reader = asyncio.create_task(self.read())
         result = await self.call('initialize', {'clientInfo': {'name': 'walking_workstation', 'title': '行走工作台', 'version': '0.1.0'}})
         await self.send({'method': 'initialized', 'params': {}})

@@ -85,6 +85,13 @@ Rove 是开源、自托管的网页 AI 编程工作台（Web UI），支持通�
 - **SQLite 事件压缩与在线瘦身 (`workstation/retention.py`)**：一键诊断表空间占用，自动精简已结束会话的流式 `delta` 碎片与内嵌大图 Blob（保留完整对话与代码变更），支持 Dry-Run 演练、自动备份与在线 `VACUUM`。
 - **PVE 主备容灾与缺失文件一键自愈 (`workstation/cluster_sync.py`)**：支持将 SQLite 热备、自定义 Agent 配置及所有登记项目源码打包为独立快照，一键同步至 Proxmox VE (PVE) 备用节点（自动完成 macOS `/Users/...` ⇄ Linux `/var/lib/...` 跨平台路径重映射），并支持 `only_missing_files` 模式精准恢复误删文件。
 
+### 5. 自治可靠性、多账号池与富交互扩展
+- **配额耗尽自动续跑与紧迫度选路 (`workstation/quota_wait.py` & `workstation/model_router.py`)**：订阅撞上 5 小时/周限额时自动登记重置时间并延迟错峰续跑；支持按 `剩余配额 / 距重置时长` 优先消耗即将过期的额度。
+- **多账号隔离与设备码直登 (`workstation/account_pool.py`)**：通过 `CODEX_HOME` / `CLAUDE_CONFIG_DIR` 目录隔离支持单机多订阅账号池，设置页一键触发 `--device-auth` 设备码授权与状态检测（未授权账号不顶替宿主机可用默认账号）。
+- **独立只读 `/review` 与死循环守卫 (`workstation/review.py` & `workstation/loop_guard.py`)**：在隔离只读子会话执行无开发记忆的代码/Git 复核（含未跟踪文件哈希防过期 Fail-Closed 校验），并在任务中自动拦截工具重复空转。
+- **零留痕保密代输入与视觉桥 (`workstation/input_handoff.py` & `workstation/vision_bridge.py`)**：敏感输入经 `0600` 临时 IPC 文件直达 Worker 后立即销毁、不落库；纯文本模型收到截图时自动转译描述。
+- **运行中队列、分叉 Fork、Doorbell Webhook 与 `rove-ui` (`workstation/fork.py`, `workstation/webhooks.py`, `workstation/rich_ui.py`)**：支持运行中消息排队/插话、任意轮次分叉会话、HMAC 验签的 GitHub 门铃事件唤醒，以及遵循 Anti-AI-Slop 语义配色的流式富卡片组件。
+
 ---
 
 ## Architecture Overview

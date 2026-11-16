@@ -774,3 +774,8 @@ async def get_all_quotas(force: bool = False) -> dict:
             next_expiry = min(next_expiry, float(min(future_resets)))
         _CACHE_EXPIRY = next_expiry
         return payload
+
+
+def get_cached_quotas() -> dict:
+    """Return the last cached quota snapshot without spawning external processes."""
+    return dict(_CACHE) if isinstance(_CACHE, dict) else {}

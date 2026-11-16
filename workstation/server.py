@@ -40,6 +40,13 @@ from . import worktree
 from . import feishu_relay
 from . import design_guard
 from . import retention
+from . import input_handoff
+from . import quota_wait
+from . import review
+from . import account_pool
+from . import fork
+from . import model_router
+from . import webhooks
 
 COOKIE = 'walking_session'
 MODEL_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$')
@@ -94,6 +101,65 @@ async def _background_retention_loop():
             pass
 
 
+def _resume_quota_wait_job(wait_row: dict) -> bool:
+    s = db.one('SELECT * FROM sessions WHERE id=?', (wait_row['session_id'],))
+    if not s:
+        return False
+    resume_prompt = (
+        '请继续完成刚才因额度限制暂停的任务。'
+        if wait_row.get('has_output') else
+        (wait_row.get('prompt') or '请继续执行任务。')
+    )
+    job_id = secrets.token_hex(12)
+    req_id = f"qw-{wait_row['id']}-{secrets.token_hex(4)}"
+    now = time.time()
+    try:
+        with db.transaction() as conn:
+            conn.execute(
+                'INSERT INTO jobs(id,session_id,request_id,prompt,status,started,model,effort,mode,fast,images) '
+                'VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                (
+                    job_id,
+                    s['id'],
+                    req_id,
+                    resume_prompt,
+                    'queued',
+                    now,
+                    wait_row.get('model') or s.get('model'),
+                    s.get('effort'),
+                    s.get('mode') or 'standard',
+                    int(bool(s.get('fast'))),
+                    '[]',
+                ),
+            )
+            conn.execute(
+                'INSERT INTO events(session_id,job_id,kind,payload,created) VALUES(?,?,?,?,?)',
+                (
+                    s['id'],
+                    job_id,
+                    'notice',
+                    json.dumps({'text': '✅ 用量已恢复，已自动继续执行本任务。'}, ensure_ascii=False),
+                    now,
+                ),
+            )
+        spawn('workstation.worker', job_id)
+        return True
+    except Exception:
+        return False
+
+
+async def _background_quota_wait_loop():
+    """Poll due quota-wait entries every 30s and auto-resume eligible sessions."""
+    while True:
+        try:
+            await asyncio.sleep(30)
+            await asyncio.to_thread(quota_wait.process_due_quota_waits, _resume_quota_wait_job)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            pass
+
+
 @asynccontextmanager
 async def lifespan(app):
     db.init()
@@ -104,11 +170,13 @@ async def lifespan(app):
     for job in db.query("SELECT id FROM jobs WHERE status='queued'"):
         spawn('workstation.worker', job['id'])
     maint_task = asyncio.create_task(_background_retention_loop())
+    quota_task = asyncio.create_task(_background_quota_wait_loop())
     yield
     # Do not terminate detached workers when the HTTP server shuts down.
-    maint_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await maint_task
+    for task in (maint_task, quota_task):
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
     if awake:
         awake.terminate()
         await awake.wait()
@@ -139,7 +207,8 @@ async def security(request: Request, call_next):
             path in ('/api/cluster/ping', '/api/cluster/snapshot/export', '/api/cluster/snapshot/import')
             and cluster_sync.verify_cluster_token(request.headers.get('x-cluster-token'))
         )
-        if not is_watch_public and not is_eink_public and not is_feishu_webhook and not is_cluster_token_auth:
+        is_github_webhook = (path == '/api/webhooks/github' and request.method == 'POST')
+        if not is_watch_public and not is_eink_public and not is_feishu_webhook and not is_cluster_token_auth and not is_github_webhook:
             if request.method not in ('GET', 'HEAD'):
                 origin = request.headers.get('origin')
                 if (origin and origin not in db.config()['origins']) or request.headers.get('x-workstation') != '1':
@@ -329,7 +398,7 @@ async def state(sync: bool = True):
             p['is_workspace'] = False
     projects_list.sort(key=lambda p: (not p['is_workspace'], p['name'].lower()))
 
-    sessions_list = db.query('SELECT * FROM sessions ORDER BY pinned DESC, updated DESC')
+    sessions_list = db.query("SELECT * FROM sessions WHERE COALESCE(thread_kind, 'user') != 'review' ORDER BY pinned DESC, updated DESC")
     jobs_list = db.query('SELECT id,session_id,status,started,ended,error,model,effort,mode,fast,engine,execution_target,cloud_task_id FROM jobs ORDER BY rowid DESC LIMIT 200')
     active_local = {j['session_id'] for j in jobs_list if j['status'] in ('queued', 'running', 'waiting')}
     live_map_codex = await asyncio.to_thread(codex_sync.live_thread_states, sessions_list, active_local)
@@ -532,6 +601,42 @@ async def delete_project_memory(ident: str):
     return {'ok': True, 'id': ident}
 
 
+class MemoryConsolidateBody(BaseModel):
+    source_ids: list[str] = Field(min_length=1, max_length=50)
+    content: str = Field(min_length=1, max_length=2000)
+    category: str = Field(default='convention', max_length=40)
+    why: str = Field(default='', max_length=500)
+    how_to_apply: str = Field(default='', max_length=500)
+    pinned: bool = False
+
+
+@app.get('/api/projects/{ident}/memories/search')
+async def search_project_memories(ident: str, q: str = '', limit: int = 8):
+    project(ident)
+    return {
+        'project_id': ident,
+        'query': q,
+        'memories': memories.search_memories(ident, q, limit=max(1, min(limit, 50))),
+    }
+
+
+@app.post('/api/projects/{ident}/memories/consolidate')
+async def consolidate_project_memories(ident: str, body: MemoryConsolidateBody):
+    project(ident)
+    try:
+        return memories.consolidate_memories(
+            project_id=ident,
+            source_ids=body.source_ids,
+            target_content=body.content,
+            category=body.category,
+            why=body.why,
+            how_to_apply=body.how_to_apply,
+            pinned=body.pinned,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
 @app.post('/api/sessions/{ident}/extract-memory')
 async def extract_session_memory(ident: str):
     s = session(ident)
@@ -648,6 +753,9 @@ class SessionPatch(BaseModel):
     effort: EffortType | None = None
     mode: ModeType | None = None
     fast: bool | None = None
+    account_id: str | None = Field(default=None, max_length=64)
+    generation: int | None = None
+    defer_if_busy: bool = False
 
 
 @app.patch('/api/sessions/{ident}')
@@ -655,8 +763,32 @@ class SessionPatch(BaseModel):
 async def update_session(ident: str, body: SessionPatch):
     current = session(ident)
     fields = body.model_fields_set
+    if 'generation' in fields and body.generation is not None:
+        cur_gen = int(current.get('runtime_generation') or 1)
+        if body.generation != cur_gen:
+            raise HTTPException(409, f'会话运行时版本已过期 (expected {cur_gen}, got {body.generation})')
     updates, params = [], []
     renamed_to = None
+    active_job = db.one("SELECT id FROM jobs WHERE session_id=? AND status IN ('queued','running','waiting') LIMIT 1", (current['id'],))
+    runtime_keys = {'engine', 'model', 'effort', 'mode', 'fast'}
+    if body.defer_if_busy and active_job and (fields & runtime_keys):
+        try:
+            pending_rt = json.loads(current.get('pending_runtime_json') or '{}')
+        except Exception:
+            pending_rt = {}
+        if not isinstance(pending_rt, dict):
+            pending_rt = {}
+        for k in ('engine', 'model', 'effort', 'mode'):
+            if k in fields and getattr(body, k) is not None:
+                pending_rt[k] = getattr(body, k)
+        if 'fast' in fields and body.fast is not None:
+            pending_rt['fast'] = int(body.fast)
+        updates.extend(['pending_runtime_json=?', 'runtime_generation=COALESCE(runtime_generation,1)+1'])
+        params.extend([json.dumps(pending_rt, ensure_ascii=False)])
+        fields = fields - runtime_keys
+    if 'account_id' in fields:
+        updates.append('account_id=?')
+        params.append(body.account_id or None)
     if 'title' in fields and body.title is not None:
         cleaned = body.title.strip()
         if not cleaned:
@@ -678,6 +810,7 @@ async def update_session(ident: str, body: SessionPatch):
         params.extend([body.engine, target_nid, orig_codex_id, orig_agy_id])
     next_engine = body.engine if ('engine' in fields and body.engine and agents.is_valid_engine(body.engine)) else current['engine']
     if 'model' in fields or 'engine' in fields:
+        quota_wait.cancel_quota_wait(current['id'], reason='model_or_engine_switched')
         wanted_model = clean_model(body.model) if 'model' in fields else current.get('model')
         wanted_effort = body.effort if 'effort' in fields else current.get('effort')
         resolved_model, resolved_effort = engines.resolve_model(next_engine, wanted_model, wanted_effort)
@@ -796,6 +929,7 @@ class Prompt(BaseModel):
 @app.post('/api/sessions/{ident}/messages')
 async def send_message(ident: str, body: Prompt):
     s = session(ident)
+    quota_wait.cancel_quota_wait(ident, reason='user_sent_message')
     prompt_text = body.text
     if not prompt_text.strip():
         if body.images:
@@ -1146,11 +1280,373 @@ async def answer_questions(ident: str, body: Answers):
         raise HTTPException(400, '请回答所有问题')
     # Secret answers should be entered in the native client, never persisted in this transcript.
     if any(q.get('isSecret') for q in questions):
-        raise HTTPException(400, '此问题含敏感输入，请在原生客户端处理')
+        raise HTTPException(400, '此问题含敏感输入，请使用保密代输入通道提交')
     encoded = json.dumps({'answers': {k: {'answers': v} for k, v in body.answers.items()}}, ensure_ascii=False)
     if not db.decide_approval(ident, encoded):
         raise HTTPException(409, '问题已处理或任务已结束')
     return {'ok': True}
+
+
+class SecretAnswers(BaseModel):
+    answers: dict[str, str]
+
+
+@app.post('/api/approvals/{ident}/secret')
+async def answer_secret_questions(ident: str, body: SecretAnswers):
+    """Zero-trace secret submission: stores secret values in RAM only, never in SQLite."""
+    value = db.one('SELECT a.*,j.session_id,j.status FROM approvals a JOIN jobs j ON j.id=a.job_id WHERE a.id=?', (ident,))
+    if not value or value['status'] != 'waiting' or value['method'] != 'item/tool/requestUserInput':
+        raise HTTPException(409, '保密输入请求已失效')
+    s = session(value['session_id'])
+    questions = json.loads(value['payload']).get('questions', [])
+    expected_ids = {q['id'] for q in questions}
+    if set(body.answers) != expected_ids or any(not str(v).strip() or len(str(v)) > 4096 for v in body.answers.values()):
+        raise HTTPException(400, '请填写全部必填项')
+    handoff = input_handoff.create_secret_handoff(
+        job_id=value['job_id'],
+        session_id=s['id'],
+        purpose='交互式保密输入',
+        fields=questions,
+    )
+    if not input_handoff.submit_secret_values(handoff['id'], body.answers):
+        raise HTTPException(409, '保密输入提交失败')
+    encoded_ref = json.dumps({'__secret_handoff': handoff['id']}, ensure_ascii=False)
+    if not db.decide_approval(ident, encoded_ref):
+        input_handoff.cancel_secret_handoff(handoff['id'])
+        raise HTTPException(409, '审批已处理或任务已结束')
+    db.event(s['id'], value['job_id'], 'notice', {'text': '🔐 已通过零留痕通道完成保密输入。'})
+    return {'ok': True, 'handoff_id': handoff['id']}
+
+
+class ReviewCreateBody(BaseModel):
+    engine: str | None = None
+    model: str | None = Field(default=None, max_length=120)
+    focus: str = Field(default='', max_length=1000)
+
+
+@app.get('/api/sessions/{ident}/quota-wait')
+async def get_session_quota_wait(ident: str):
+    session(ident)
+    return {'quota_wait': quota_wait.get_active_quota_wait(ident)}
+
+
+@app.delete('/api/sessions/{ident}/quota-wait')
+async def cancel_session_quota_wait(ident: str):
+    session(ident)
+    cancelled = quota_wait.cancel_quota_wait(ident, reason='user_cancelled')
+    return {'ok': True, 'cancelled': cancelled}
+
+
+@app.get('/api/sessions/{ident}/reviews')
+async def list_session_reviews(ident: str):
+    s = session(ident)
+    p = project(s['project_id'])
+    workdir = db.session_workdir(s, p)
+    rows = db.query('SELECT * FROM reviews WHERE session_id=? ORDER BY created DESC LIMIT 20', (ident,))
+    checked = [review.check_review_freshness(r, workdir) for r in rows]
+    return {'session_id': ident, 'reviews': checked}
+
+
+@app.post('/api/sessions/{ident}/review', status_code=202)
+async def start_session_review(ident: str, body: ReviewCreateBody):
+    s = session(ident)
+    p = project(s['project_id'])
+    rev_engine = body.engine if (body.engine and agents.is_valid_engine(body.engine)) else s.get('engine', 'codex')
+    if not agents.is_agent_installed(rev_engine):
+        raise HTTPException(409, f'{rev_engine} 尚未安装或未配置可执行路径')
+    rev_model = clean_model(body.model) if body.model else s.get('model')
+    rev_model, _ = engines.resolve_model(rev_engine, rev_model, None)
+
+    rev_prompt = await asyncio.to_thread(review.build_review_prompt, s, p, body.focus)
+    rev_row = review.create_review_record(s, p, rev_engine, rev_model, focus=body.focus)
+
+    # Create a dedicated, memory-free, read-only review session so the worker NEVER resumes
+    # the developer's native thread and ALWAYS executes with rev_engine in plan mode.
+    rev_session_id = secrets.token_hex(12)
+    job_id = secrets.token_hex(12)
+    req_id = f"rev-{rev_row['id']}"
+    now = time.time()
+    try:
+        with db.transaction() as conn:
+            conn.execute(
+                'INSERT INTO sessions(id,project_id,engine,title,native_id,created,updated,'
+                'model,effort,mode,fast,pinned,cwd,thread_kind,parent_session_id,forked_at_job_id) '
+                'VALUES(?,?,?,?,NULL,?,?,?,?,0,0,?,?,?,?,NULL)',
+                (
+                    rev_session_id,
+                    p['id'],
+                    rev_engine,
+                    f"Review: {s.get('title') or ident}",
+                    now,
+                    now,
+                    rev_model,
+                    'high',
+                    'plan',
+                    s.get('worktree_path') or s.get('cwd'),
+                    'review',
+                    ident,
+                ),
+            )
+            conn.execute(
+                'INSERT INTO jobs(id,session_id,request_id,prompt,status,started,model,effort,mode,fast,images) '
+                'VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                (job_id, rev_session_id, req_id, rev_prompt, 'queued', now, rev_model, 'high', 'plan', 0, '[]'),
+            )
+            conn.execute('UPDATE reviews SET review_job_id=?, updated=? WHERE id=?', (job_id, now, rev_row['id']))
+            conn.execute(
+                'INSERT INTO events(session_id,job_id,kind,payload,created) VALUES(?,?,?,?,?)',
+                (
+                    ident,
+                    job_id,
+                    'notice',
+                    json.dumps({'text': f'🔍 已在隔离只读会话启动 /review（{rev_engine}），不继承开发记忆与思考过程。'}, ensure_ascii=False),
+                    now,
+                ),
+            )
+    except sqlite3.IntegrityError:
+        db.execute("UPDATE reviews SET status='failed', updated=? WHERE id=?", (time.time(), rev_row['id']))
+        raise HTTPException(409, '启动独立 /review 失败')
+    spawn('workstation.worker', job_id)
+    return {'review': db.one('SELECT * FROM reviews WHERE id=?', (rev_row['id'],)), 'job_id': job_id, 'review_session_id': rev_session_id}
+
+
+class ModelRouteBody(BaseModel):
+    candidates: list[dict] = Field(min_length=1, max_length=32)
+    has_images: bool = False
+
+
+@app.post('/api/models/route')
+async def route_model_group(body: ModelRouteBody):
+    q_snap = quotas.get_cached_quotas() if hasattr(quotas, 'get_cached_quotas') else None
+    ranked = model_router.rank_candidates_by_urgency(
+        body.candidates, quotas_snapshot=q_snap, has_images=body.has_images
+    )
+    return {'selected': ranked[0] if ranked else None, 'ranked': ranked}
+
+
+class AccountCreateBody(BaseModel):
+    engine: Literal['codex', 'claude-code', 'antigravity']
+    label: str = Field(min_length=1, max_length=80)
+    home_dir: str | None = Field(default=None, max_length=300)
+    priority: int = 0
+
+
+class AccountQuickLoginBody(BaseModel):
+    engine: Literal['codex', 'claude-code', 'antigravity']
+    label: str | None = Field(default=None, max_length=80)
+
+
+@app.post('/api/accounts/quick-login', status_code=201)
+async def quick_login_subscription_account(body: AccountQuickLoginBody):
+    try:
+        return account_pool.quick_login_account(body.engine, body.label)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:
+        raise HTTPException(500, f'启动直接登录失败: {exc}')
+
+
+@app.get('/api/accounts')
+async def list_subscription_accounts(engine: str | None = None):
+    rows = account_pool.list_accounts(engine=engine)
+    for r in rows:
+        r['authenticated'] = account_pool.is_account_authenticated(r)
+        r['login_command'] = account_pool.login_command_hint(r)
+    return {'accounts': rows}
+
+
+@app.post('/api/accounts', status_code=201)
+async def create_subscription_account(body: AccountCreateBody):
+    try:
+        row = account_pool.add_account(body.engine, body.label, body.home_dir, body.priority)
+        row['authenticated'] = account_pool.is_account_authenticated(row)
+        row['login_command'] = account_pool.login_command_hint(row)
+        return row
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.post('/api/accounts/{ident}/login')
+async def launch_subscription_account_login(ident: str):
+    try:
+        return account_pool.start_account_login(ident)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    except Exception as exc:
+        raise HTTPException(500, f'启动登录进程失败: {exc}')
+
+
+@app.post('/api/accounts/{ident}/pause')
+async def toggle_subscription_account(ident: str, paused: bool = True):
+    row = account_pool.set_account_paused(ident, paused)
+    if not row:
+        raise HTTPException(404, '账号不存在')
+    row['authenticated'] = account_pool.is_account_authenticated(row)
+    return row
+
+
+@app.delete('/api/accounts/{ident}')
+async def delete_subscription_account(ident: str, purge_dir: bool = True):
+    if not account_pool.remove_account(ident, purge_dir=purge_dir):
+        raise HTTPException(404, '账号不存在')
+    return {'ok': True}
+
+
+class QueueItemBody(BaseModel):
+    text: str = Field(min_length=1, max_length=50000)
+    steer: bool = False
+    model: str | None = None
+    effort: str | None = None
+    mode: str | None = None
+    fast: bool | None = None
+
+
+class QueueMergeBody(BaseModel):
+    ids: list[str] = Field(min_length=2, max_length=20)
+
+
+@app.get('/api/sessions/{ident}/queue')
+async def list_session_queue(ident: str):
+    session(ident)
+    rows = db.query(
+        "SELECT * FROM session_queue WHERE session_id=? AND status='pending' ORDER BY steer DESC, created ASC",
+        (ident,),
+    )
+    return {'session_id': ident, 'queue': rows}
+
+
+@app.post('/api/sessions/{ident}/queue', status_code=201)
+async def enqueue_session_message(ident: str, body: QueueItemBody):
+    s = session(ident)
+    qid = secrets.token_hex(8)
+    now = time.time()
+    db.execute(
+        'INSERT INTO session_queue(id,session_id,prompt,engine,model,effort,mode,fast,images,steer,status,created,updated) '
+        'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        (
+            qid, ident, body.text.strip(), s.get('engine'),
+            body.model or s.get('model'), body.effort or s.get('effort'),
+            body.mode or s.get('mode'), int(body.fast if body.fast is not None else bool(s.get('fast'))),
+            '[]', 1 if body.steer else 0, 'pending', now, now,
+        ),
+    )
+    return db.one('SELECT * FROM session_queue WHERE id=?', (qid,))
+
+
+@app.patch('/api/queue/{ident}')
+async def update_queued_message(ident: str, body: QueueItemBody):
+    row = db.one("SELECT * FROM session_queue WHERE id=? AND status='pending'", (ident,))
+    if not row:
+        raise HTTPException(404, '排队消息不存在或已被消费')
+    db.execute(
+        'UPDATE session_queue SET prompt=?, steer=?, updated=? WHERE id=?',
+        (body.text.strip(), 1 if body.steer else 0, time.time(), ident),
+    )
+    return db.one('SELECT * FROM session_queue WHERE id=?', (ident,))
+
+
+@app.delete('/api/queue/{ident}')
+async def cancel_queued_message(ident: str):
+    cur = db.execute("UPDATE session_queue SET status='cancelled', updated=? WHERE id=? AND status='pending'", (time.time(), ident))
+    if not cur:
+        raise HTTPException(404, '排队消息不存在或已被消费')
+    return {'ok': True}
+
+
+@app.post('/api/sessions/{ident}/queue/merge')
+async def merge_session_queue(ident: str, body: QueueMergeBody):
+    session(ident)
+    placeholders = ','.join('?' for _ in body.ids)
+    rows = db.query(
+        f"SELECT * FROM session_queue WHERE session_id=? AND status='pending' AND id IN ({placeholders}) ORDER BY created ASC",
+        (ident, *body.ids),
+    )
+    if len(rows) < 2:
+        raise HTTPException(400, '至少需要两条待发送的排队消息才能合并')
+    merged_text = '\n\n'.join(r['prompt'] for r in rows)
+    keep = rows[0]
+    now = time.time()
+    with db.transaction() as conn:
+        conn.execute('UPDATE session_queue SET prompt=?, updated=? WHERE id=?', (merged_text, now, keep['id']))
+        for r in rows[1:]:
+            conn.execute("UPDATE session_queue SET status='merged', updated=? WHERE id=?", (now, r['id']))
+    return db.one('SELECT * FROM session_queue WHERE id=?', (keep['id'],))
+
+
+class ForkBody(BaseModel):
+    job_id: str | None = None
+    title: str | None = Field(default=None, max_length=160)
+
+
+@app.post('/api/sessions/{ident}/fork', status_code=201)
+async def fork_session_endpoint(ident: str, body: ForkBody):
+    session(ident)
+    try:
+        return fork.fork_session_at_job(ident, target_job_id=body.job_id, title=body.title)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get('/api/worktrees/recycle-journal')
+async def get_worktree_recycle_journal():
+    return {'items': worktree.list_recycle_journal()}
+
+
+@app.post('/api/worktrees/recycle-journal/{ident}/keep')
+async def keep_recycled_worktree(ident: str):
+    row = worktree.mark_recycle_kept(ident)
+    if not row:
+        raise HTTPException(404, '记录不存在')
+    return row
+
+
+@app.post('/api/webhooks/github')
+async def github_doorbell_webhook(request: Request):
+    cfg = db.config()
+    secret = str(cfg.get('github_webhook_secret') or '').strip()
+    if not secret:
+        raise HTTPException(403, '未配置 github_webhook_secret')
+    raw = await request.body()
+    sig = request.headers.get('x-hub-signature-256', '')
+    if not webhooks.verify_github_signature(secret, raw, sig):
+        raise HTTPException(401, 'Webhook 签名无效')
+    event_name = request.headers.get('x-github-event', 'unknown')
+    delivery_id = request.headers.get('x-github-delivery', '')
+    try:
+        payload = json.loads(raw.decode('utf-8'))
+    except Exception:
+        raise HTTPException(400, 'Invalid JSON')
+    meta = webhooks.extract_doorbell_metadata(event_name, payload, delivery_id)
+    gate = webhooks.record_and_check_doorbell(delivery_id, meta)
+    return {'ok': True, 'gate': gate, 'doorbell': meta}
+
+
+@app.post('/api/reviews/{ident}/apply', status_code=202)
+async def apply_review_findings(ident: str):
+    rev = db.one('SELECT * FROM reviews WHERE id=?', (ident,))
+    if not rev:
+        raise HTTPException(404, '复核记录不存在')
+    s = session(rev['session_id'])
+    p = project(rev['project_id'])
+    rev = review.check_review_freshness(rev, db.session_workdir(s, p))
+    if rev['status'] != 'completed':
+        raise HTTPException(409, f"当前复核状态为 {rev['status']}，已过期或未完成，不可回流修复（Fail-Closed）")
+    fix_prompt = review.build_fix_prompt_from_review(rev)
+    job_id = secrets.token_hex(12)
+    req_id = f"fix-{ident}-{secrets.token_hex(4)}"
+    now = time.time()
+    try:
+        with db.transaction() as conn:
+            conn.execute(
+                'INSERT INTO jobs(id,session_id,request_id,prompt,status,started,model,effort,mode,fast,images) '
+                'VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                (job_id, s['id'], req_id, fix_prompt, 'queued', now, s.get('model'), s.get('effort'), s.get('mode') or 'standard', int(bool(s.get('fast'))), '[]'),
+            )
+            conn.execute('UPDATE reviews SET applied=1, updated=? WHERE id=?', (now, ident))
+    except sqlite3.IntegrityError:
+        raise HTTPException(409, '当前会话已有任务正在执行')
+    spawn('workstation.worker', job_id)
+    return {'ok': True, 'job_id': job_id}
 
 
 def get_watch_token() -> str:

@@ -18,7 +18,13 @@ from . import antigravity_hub
 from . import webpush
 from . import memories
 from . import design_guard
+from . import account_pool
 from . import context_bridge
+from . import input_handoff
+from . import loop_guard
+from . import quota_wait
+from . import quotas
+from . import review
 from .rpc import CodexRPC
 
 DELTA_METHODS = (
@@ -62,6 +68,7 @@ async def run_codex(job, session, project):
     turn = None
     buffered = None
     last_flush = time.monotonic()
+    guard = loop_guard.ToolLoopGuard()
 
     def flush():
         nonlocal buffered, last_flush
@@ -91,10 +98,29 @@ async def run_codex(job, session, project):
             return
         flush()
         if method in ('item/started', 'item/completed') and isinstance(params.get('item'), dict) and params['item'].get('id'):
+            item = params['item']
+            item_type = item.get('type') or ''
             db.execute(
                 'INSERT OR REPLACE INTO synced_codex_items(session_id,item_id,updated_ordinal) VALUES(?,?,?)',
-                (session['id'], params['item']['id'], 999999999),
+                (session['id'], item['id'], 999999999),
             )
+            if item_type in ('commandExecution', 'fileChange', 'mcpToolCall'):
+                tool_input = item.get('command') or item.get('changes') or item.get('arguments') or item_type
+                if method == 'item/started':
+                    guard.on_tool_use(item['id'], item_type, tool_input)
+                else:
+                    tool_out = item.get('aggregatedOutput') or item.get('output') or item.get('status') or ''
+                    verdict = guard.on_tool_result(item['id'], item_type, tool_input, tool_out)
+                    if verdict.get('status') == 'stop':
+                        db.event(session['id'], job['id'], 'notice', {
+                            'text': f"🛑【死循环守卫】检测到连续重复工具调用 ({verdict.get('reason')})，已自动触发安全中断。"
+                        })
+                        db.execute('UPDATE jobs SET stop=1 WHERE id=?', (job['id'],))
+                    elif verdict.get('status') == 'suspected':
+                        db.event(session['id'], job['id'], 'notice', {
+                            'text': f"⚠️【死循环预警】工具 `{verdict.get('tool')}` 疑似重复空转 ({verdict.get('reason')}, {verdict.get('count')}次)，若无进展请手动停止。"
+                        })
+                        guard.grant_grace(20)
         # Persist the supported protocol stream; skip turn/diff/updated to avoid duplicating large diffs per edit.
         if method != 'turn/diff/updated' and (
             method.startswith(('item/', 'turn/'))
@@ -133,32 +159,45 @@ async def run_codex(job, session, project):
         db.execute("UPDATE jobs SET status='waiting' WHERE id=?", (job['id'],))
         db.event(session['id'], job['id'], 'approval', {'id': ident, 'method': method, 'params': msg.get('params') or {}})
         await webpush.notify_job_approval(session, project, ident, method, msg.get('params') or {})
-        while not completed.is_set():
-            approval = db.one('SELECT decision FROM approvals WHERE id=?', (ident,))
-            state = db.one('SELECT stop FROM jobs WHERE id=?', (job['id'],))
-            if approval['decision'] or state['stop']:
-                # Several parallel tools may be waiting; keep the remaining requests visible.
-                pending = db.one('SELECT count(*) AS n FROM approvals WHERE job_id=? AND id!=? AND decision IS NULL', (job['id'], ident))['n']
-                db.execute('UPDATE jobs SET status=? WHERE id=?', ('waiting' if pending else 'running', job['id']))
-                decision = approval['decision']
-                if method == 'mcpServer/elicitation/request':
-                    action = {'accept': 'accept', 'decline': 'decline'}.get(decision, 'cancel')
-                    result = {'action': action}
-                    if action == 'accept':
-                        result['content'] = {}
-                    return {'result': result}
-                if method == 'item/tool/requestUserInput':
-                    return {'result': json.loads(decision) if decision else {'answers': {}}}
-                if method == 'item/permissions/requestApproval':
-                    if decision == 'accept':
-                        return {'result': {'permissions': (msg.get('params') or {}).get('permissions', {}), 'scope': 'session'}}
-                    return {'result': {'permissions': {}, 'scope': 'turn'}}
-                if method in ('execCommandApproval', 'applyPatchApproval'):
-                    if decision == 'accept':
-                        return {'result': {'decision': 'approved'}}
-                    return {'result': {'decision': {'denied': {'rejection': 'User declined'}}}}
-                return {'result': {'decision': decision or 'cancel'}}
-            await asyncio.sleep(.3)
+        guard.set_waiting_for_human(True)
+        try:
+            while not completed.is_set():
+                approval = db.one('SELECT decision FROM approvals WHERE id=?', (ident,))
+                state = db.one('SELECT stop FROM jobs WHERE id=?', (job['id'],))
+                if approval['decision'] or state['stop']:
+                    # Several parallel tools may be waiting; keep the remaining requests visible.
+                    pending = db.one('SELECT count(*) AS n FROM approvals WHERE job_id=? AND id!=? AND decision IS NULL', (job['id'], ident))['n']
+                    db.execute('UPDATE jobs SET status=? WHERE id=?', ('waiting' if pending else 'running', job['id']))
+                    decision = approval['decision']
+                    if method == 'mcpServer/elicitation/request':
+                        action = {'accept': 'accept', 'decline': 'decline'}.get(decision, 'cancel')
+                        result = {'action': action}
+                        if action == 'accept':
+                            result['content'] = {}
+                        return {'result': result}
+                    if method == 'item/tool/requestUserInput':
+                        parsed_dec = json.loads(decision) if decision else {'answers': {}}
+                        if isinstance(parsed_dec, dict) and parsed_dec.get('__secret_handoff'):
+                            secret_vals = input_handoff.pop_secret_values(parsed_dec['__secret_handoff'])
+                            if secret_vals is None:
+                                db.event(session['id'], job['id'], 'notice', {
+                                    'text': '⚠️ 保密输入已过期或未被读取，请重新提交。'
+                                })
+                                return {'result': {'answers': {}}}
+                            return {'result': {'answers': {k: [v] for k, v in secret_vals.items()}}}
+                        return {'result': parsed_dec}
+                    if method == 'item/permissions/requestApproval':
+                        if decision == 'accept':
+                            return {'result': {'permissions': (msg.get('params') or {}).get('permissions', {}), 'scope': 'session'}}
+                        return {'result': {'permissions': {}, 'scope': 'turn'}}
+                    if method in ('execCommandApproval', 'applyPatchApproval'):
+                        if decision == 'accept':
+                            return {'result': {'decision': 'approved'}}
+                        return {'result': {'decision': {'denied': {'rejection': 'User declined'}}}}
+                    return {'result': {'decision': decision or 'cancel'}}
+                await asyncio.sleep(.3)
+        finally:
+            guard.set_waiting_for_human(False)
         return {'result': {'decision': 'cancel'}}
 
     mode = job.get('mode') or session.get('mode') or 'standard'
@@ -187,7 +226,8 @@ async def run_codex(job, session, project):
         session, project, target_engine='codex', exclude_job_id=job['id']
     )
 
-    rpc = CodexRPC(db.config()['codex_bin'], notify, request)
+    acct_env = account_pool.resolve_account_env_for_session(session, 'codex')
+    rpc = CodexRPC(db.config()['codex_bin'], notify, request, env=acct_env) if acct_env else CodexRPC(db.config()['codex_bin'], notify, request)
     try:
         await rpc.start()
         params = {
@@ -482,6 +522,22 @@ async def run(ident):
     db.event(session['id'], ident, 'job_status', outcome)
     if outcome['status'] == 'completed' and job.get('execution_target') != 'cloud':
         with contextlib.suppress(Exception):
+            quota_wait.reset_attempts(session['id'])
+        with contextlib.suppress(Exception):
+            rev = db.one('SELECT * FROM reviews WHERE review_job_id=?', (ident,))
+            if rev:
+                turns = context_bridge.extract_session_turns(session['id'])
+                rev_turn = next((t for t in reversed(turns) if t.get('job_id') == ident), None)
+                rev_text = (rev_turn or {}).get('reply') or ''
+                workdir = db.session_workdir(session, project)
+                done_rev = review.complete_review_record(rev['id'], rev_text, workdir, failed=False)
+                cnt = done_rev.get('findings_count') if done_rev else None
+                cnt_label = f'{cnt} 条发现' if cnt is not None else '复核完成'
+                preview = rev_text.strip()[:1200] or '（无详细输出）'
+                db.event(rev['session_id'], ident, 'notice', {
+                    'text': f"📋【独立 /review 结论（{done_rev.get('status')} · {cnt_label}）】\n{preview}"
+                })
+        with contextlib.suppress(Exception):
             memories.auto_record_from_job(session, job, project)
             if design_guard.is_ui_task(job.get('prompt', '')):
                 workdir = db.session_workdir(session, project)
@@ -501,7 +557,123 @@ async def run(ident):
                     db.event(session['id'], ident, 'notice', {
                         'text': f"🎨【Anti-Slop 审美审计】{findings[0]['advice']}"
                     })
+    elif outcome['status'] == 'failed':
+        err_msg = outcome.get('error') or ''
+        with contextlib.suppress(Exception):
+            rev = db.one('SELECT * FROM reviews WHERE review_job_id=?', (ident,))
+            if rev:
+                review.complete_review_record(rev['id'], err_msg, db.session_workdir(session, project), failed=True)
+        if context_bridge.is_context_overflow_error(err_msg):
+            with contextlib.suppress(Exception):
+                side_effects = context_bridge.has_turn_side_effects(session['id'], ident)
+                if active_engine == 'codex':
+                    db.execute('UPDATE sessions SET native_codex_id=NULL, native_id=NULL WHERE id=?', (session['id'],))
+                elif active_engine == 'antigravity':
+                    db.execute('UPDATE sessions SET native_antigravity_id=NULL WHERE id=?', (session['id'],))
+                else:
+                    agents.set_session_native_agent_id(session['id'], active_engine, None)
+                note = (
+                    '🪟【上下文满窗已准备自动换窗】已归档旧原生窗口；因本轮已有部分副作用输出，请手动确认后发送下一条指令继续。'
+                    if side_effects else
+                    '🪟【上下文满窗已准备自动换窗】已归档旧原生窗口并准备好结构化交接上下文，可直接重试或发送下一条指令继续。'
+                )
+                db.event(session['id'], ident, 'notice', {'text': note})
+        elif quota_wait.is_quota_limit_error(err_msg, engine=active_engine):
+            with contextlib.suppress(Exception):
+                q_snap = quotas.get_cached_quotas() if hasattr(quotas, 'get_cached_quotas') else None
+                has_out = context_bridge.has_turn_side_effects(session['id'], ident)
+                wait_row = quota_wait.schedule_quota_wait(
+                    session_id=session['id'],
+                    job_id=ident,
+                    engine=active_engine,
+                    model=job.get('model') or session.get('model'),
+                    prompt=job.get('prompt') or '',
+                    has_output=has_out,
+                    error_text=err_msg,
+                    quotas_snapshot=q_snap,
+                )
+                if wait_row:
+                    reset_str = quotas.format_local_time(wait_row['resume_at'])
+                    db.event(session['id'], ident, 'notice', {
+                        'text': f"⏳【额度耗尽自动续跑】将在 {reset_str} 自动继续本任务（第 {wait_row['attempts']}/{quota_wait.MAX_AUTO_CONTINUE_ATTEMPTS} 次）；发送新消息、切换模型或点击取消可随时终止等待。"
+                    })
     await webpush.notify_job_outcome(ident, session, project, outcome)
+    # Apply deferred runtime changes & dispatch next queued message if any
+    with contextlib.suppress(Exception):
+        fresh_sess = db.one('SELECT * FROM sessions WHERE id=?', (session['id'],))
+        if fresh_sess and fresh_sess.get('pending_runtime_json') not in (None, '', '{}'):
+            pending_rt = json.loads(fresh_sess['pending_runtime_json'])
+            if isinstance(pending_rt, dict) and pending_rt:
+                sets, args = [], []
+                for col in ('engine', 'model', 'effort', 'mode', 'fast'):
+                    if col in pending_rt and pending_rt[col] is not None:
+                        sets.append(f'{col}=?')
+                        args.append(pending_rt[col])
+                sets.append("pending_runtime_json='{}'")
+                args.append(session['id'])
+                db.execute(f"UPDATE sessions SET {','.join(sets)} WHERE id=?", tuple(args))
+                fresh_sess = db.one('SELECT * FROM sessions WHERE id=?', (session['id'],))
+        if outcome['status'] in ('completed', 'stopped'):
+            nxt = db.one(
+                "SELECT * FROM session_queue WHERE session_id=? AND status='pending' "
+                "ORDER BY steer DESC, created ASC LIMIT 1",
+                (session['id'],),
+            )
+            if nxt:
+                next_job_id = os.urandom(12).hex()
+                now_ts = time.time()
+                eff_sess = fresh_sess or session
+                eff_model = nxt.get('model') or eff_sess.get('model')
+                eff_effort = nxt.get('effort') or eff_sess.get('effort')
+                eff_mode = nxt.get('mode') or eff_sess.get('mode') or 'standard'
+                eff_fast = int(bool(nxt['fast'] if nxt.get('fast') is not None else eff_sess.get('fast')))
+                with db.transaction() as conn:
+                    claimed = conn.execute(
+                        "UPDATE session_queue SET status='dispatched', updated=? WHERE id=? AND status='pending'",
+                        (now_ts, nxt['id']),
+                    )
+                    if claimed.rowcount:
+                        conn.execute(
+                            'INSERT INTO jobs(id,session_id,request_id,prompt,status,started,model,effort,mode,fast,images) '
+                            'VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                            (
+                                next_job_id,
+                                session['id'],
+                                f"q-{nxt['id']}",
+                                nxt['prompt'],
+                                'queued',
+                                now_ts,
+                                eff_model,
+                                eff_effort,
+                                eff_mode,
+                                eff_fast,
+                                nxt.get('images') or '[]',
+                            ),
+                        )
+                        conn.execute(
+                            'INSERT INTO events(session_id,job_id,kind,payload,created) VALUES(?,?,?,?,?)',
+                            (
+                                session['id'],
+                                next_job_id,
+                                'user',
+                                json.dumps({
+                                    'text': nxt['prompt'],
+                                    'engine': eff_sess.get('engine'),
+                                    'model': eff_model,
+                                    'effort': eff_effort,
+                                    'mode': eff_mode,
+                                    'queued': True,
+                                }, ensure_ascii=False),
+                                now_ts,
+                            ),
+                        )
+                if claimed.rowcount:
+                    subprocess.Popen(
+                        [sys.executable, '-m', 'workstation.worker', next_job_id],
+                        cwd=db.ROOT, stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        start_new_session=True, close_fds=True, env=os.environ.copy(),
+                    )
 
 
 if __name__ == '__main__':

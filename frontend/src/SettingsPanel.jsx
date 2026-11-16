@@ -5,7 +5,7 @@ import {
   Sparkles, Activity, HardDrive, Database, Plug, Server, ShieldAlert, Download, UploadCloud, DownloadCloud, Copy, Check,
 } from 'lucide-react';
 import {
-  post, base, getStorageStats, pruneStorage,
+  api, post, del, base, getStorageStats, pruneStorage,
   getAgentsHub, upsertAgent, deleteAgent, checkAgent,
   getClusterStatus, updateClusterConfig, probeClusterPeer,
   createClusterSnapshot, restoreClusterSnapshot, pushClusterSnapshot, pullClusterSnapshot,
@@ -58,6 +58,63 @@ export default function SettingsPanel({
     models_text: '',
   });
   const [agentBusy, setAgentBusy] = useState(false);
+
+  // Multi-subscription account pool state
+  const [accounts, setAccounts] = useState([]);
+  const [acctBusy, setAcctBusy] = useState(false);
+  const [acctNotice, setAcctNotice] = useState('');
+  const [pendingLogin, setPendingLogin] = useState(null);
+
+  async function refreshAccounts() {
+    try {
+      const res = await api('accounts');
+      setAccounts(res.accounts || []);
+    } catch {}
+  }
+
+  useEffect(() => {
+    refreshAccounts();
+  }, []);
+
+  async function handleQuickLogin(engine) {
+    if (acctBusy) return;
+    setAcctBusy(true);
+    setAcctNotice('');
+    setPendingLogin(null);
+    try {
+      const created = await post('accounts/quick-login', {engine});
+      if (created.login_url) {
+        setPendingLogin({
+          label: created.label,
+          url: created.login_url,
+          code: created.device_code || '',
+        });
+        setAcctNotice(`已获取「${created.label}」授权链接，若未自动弹出请点击下方「打开登录授权页」。`);
+        try { window.open(created.login_url, '_blank', 'noopener,noreferrer'); } catch {}
+      } else {
+        setAcctNotice(created.login_note || `已创建「${created.label}」，请完成授权后点击刷新。`);
+      }
+      await refreshAccounts();
+    } catch (err) {
+      setAcctNotice(err.message || '启动登录失败');
+    } finally {
+      setAcctBusy(false);
+    }
+  }
+
+  async function handleDeleteAccount(id, label) {
+    setAcctBusy(true);
+    setAcctNotice('');
+    try {
+      await del(`accounts/${id}?purge_dir=true`);
+      setAcctNotice(`已移除账号「${label}」及其隔离目录。`);
+      await refreshAccounts();
+    } catch (err) {
+      setAcctNotice(err.message || '移除账号失败');
+    } finally {
+      setAcctBusy(false);
+    }
+  }
   const [agentNotice, setAgentNotice] = useState('');
 
   // PVE Standby & Disaster Recovery state
@@ -373,9 +430,15 @@ export default function SettingsPanel({
       const res = await pwa.sendTestPush(activeSessionId);
       if (res.sent > 0) {
         setPwaNotice(`测试推送已送达（${res.sent} 台设备），请查看系统通知栏或锁屏界面。`);
+      } else if (res.failed > 0 || (res.errors && res.errors.length > 0)) {
+        const errDetail = (res.errors || []).join('；') || '推送网关拒绝请求';
+        setError(`推送发送失败（${res.failed || 1} 台设备）：${errDetail}`);
+      } else if (res.removed > 0) {
+        setPwaNotice('原订阅端点已失效并自动清理，请重新点击「开启本机锁屏推送」。');
       } else {
         setPwaNotice('当前没有有效的订阅端点，请先点击「开启本机锁屏推送」。');
       }
+      if (onRefresh) await onRefresh();
     } catch (e) {
       setError(e.message);
     } finally {
@@ -619,6 +682,11 @@ export default function SettingsPanel({
                           <strong>{sub.device_label}</strong>
                           {isCurrent && <span className="pwa-current-pill">本机</span>}
                           <span className="pwa-host-hint">{sub.endpoint_host}</span>
+                          {sub.last_error && (
+                            <small className="pwa-host-hint" style={{color: 'var(--danger)'}}>
+                              最近错误：{sub.last_error}
+                            </small>
+                          )}
                         </div>
                         <button
                           type="button"
@@ -933,6 +1001,122 @@ export default function SettingsPanel({
               </div>
             )}
             {agentNotice && <small className="sync-feedback">{agentNotice}</small>}
+          </section>
+
+          <section className="multi-agent-hub-section">
+            <div className="engine-line">
+              <h3>👤 多账号直接登录 (Codex / Google / Claude)</h3>
+              <button type="button" onClick={refreshAccounts} disabled={acctBusy} title="刷新账号登录状态">
+                <RefreshCw size={13}/> 刷新
+              </button>
+            </div>
+            <p className="muted" style={{marginBottom: 10}}>
+              无需任何配置，点击下方按钮直接打开浏览器登录新账号；支持随时暂停或一键删除。
+            </p>
+            <div className="button-row" style={{marginBottom: 10}}>
+              <button type="button" className="primary" disabled={acctBusy} onClick={() => handleQuickLogin('codex')}>
+                <Plus size={14}/> {acctBusy ? '正在获取授权链接…' : '登录 Codex 账号'}
+              </button>
+              <button type="button" className="primary" disabled={acctBusy} onClick={() => handleQuickLogin('claude-code')}>
+                <Plus size={14}/> 登录 Claude 账号
+              </button>
+              <button type="button" disabled={acctBusy} onClick={() => handleQuickLogin('antigravity')}>
+                <Plus size={14}/> 登录 Google 账号
+              </button>
+            </div>
+            {pendingLogin && (
+              <div className="rove-ui-card" style={{marginBottom: 10}}>
+                <div className="rove-ui-card-title">🔐 正在授权：{pendingLogin.label}</div>
+                {pendingLogin.code && (
+                  <div className="engine-line">
+                    <span>一次性设备验证码：<strong style={{fontSize: 16, letterSpacing: '0.06em'}}>{pendingLogin.code}</strong></span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard?.writeText(pendingLogin.code);
+                        setAcctNotice(`已复制验证码 ${pendingLogin.code}，请前往授权页面粘贴。`);
+                      }}
+                    >
+                      <Copy size={13}/> 复制验证码
+                    </button>
+                  </div>
+                )}
+                <div className="button-row">
+                  <a
+                    className="button-link primary"
+                    href={pendingLogin.url}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    <ExternalLink size={14}/> 打开登录授权页
+                  </a>
+                  <button type="button" onClick={refreshAccounts}>
+                    <RefreshCw size={13}/> 我已完成授权，刷新状态
+                  </button>
+                </div>
+              </div>
+            )}
+            {accounts.length > 0 && (
+              <div className="agent-list">
+                {accounts.map(acc => (
+                  <div key={acc.id} className="agent-row">
+                    <div>
+                      <strong>{acc.label}</strong>{' '}
+                      <span className="muted">({acc.engine})</span>{' '}
+                      <span className={`engine-label ${acc.authenticated ? 'ready' : 'unchecked'}`}>
+                        {acc.authenticated ? '已登录' : '待登录'}
+                      </span>
+                      {acc.paused ? <span className="muted"> · 已暂停</span> : null}
+                    </div>
+                    <div className="button-row">
+                      {!acc.authenticated && (
+                        <button
+                          type="button"
+                          disabled={acctBusy}
+                          onClick={async () => {
+                            setAcctBusy(true);
+                            try {
+                              const res = await post(`accounts/${acc.id}/login`, {});
+                              if (res.login_url) {
+                                setPendingLogin({label: acc.label, url: res.login_url, code: res.device_code || ''});
+                                setAcctNotice(`已获取「${acc.label}」授权链接，请完成授权后刷新。`);
+                                try { window.open(res.login_url, '_blank', 'noopener,noreferrer'); } catch {}
+                              } else {
+                                setAcctNotice(res.note || `已为「${acc.label}」启动登录。`);
+                              }
+                            } finally {
+                              setAcctBusy(false);
+                            }
+                          }}
+                        >
+                          启动登录
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        disabled={acctBusy}
+                        onClick={async () => {
+                          await post(`accounts/${acc.id}/pause?paused=${!acc.paused}`, {});
+                          await refreshAccounts();
+                        }}
+                      >
+                        {acc.paused ? '恢复' : '暂停'}
+                      </button>
+                      <button
+                        type="button"
+                        className="icon-button pwa-remove-btn"
+                        disabled={acctBusy}
+                        onClick={() => handleDeleteAccount(acc.id, acc.label)}
+                        title="移除账号并清理隔离目录"
+                      >
+                        <Trash2 size={13}/>
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {acctNotice && <small className="sync-feedback">{acctNotice}</small>}
           </section>
 
           <section className="pve-cluster-section">

@@ -97,7 +97,12 @@ flowchart TB
 | [`workstation/cluster_sync.py`](../workstation/cluster_sync.py) | 跨平台集群容灾与文件自愈 | 在线热备 + 源码归档、macOS ⇄ Linux 路径自动重映射、`only_missing_files` 误删文件自愈 |
 | [`workstation/retention.py`](../workstation/retention.py) | 数据库生命周期治理 | `dbstat` 空间诊断、流式 Delta 与超大图片 Blob 压缩、Dry-Run 演练与在线 `VACUUM` |
 | [`workstation/terminal.py`](../workstation/terminal.py) | 独立持久 PTY 终端 Broker | `pty.fork` 真实登录 Shell、`TIOCSWINSZ` 动态尺寸、环形输出截断与重放 |
-| [`frontend/src/`](../frontend/src/) | React 19 响应式工作台 UI | 双主题视觉系统、思考流/执行计划/内联 Diff 渲染、`@` 文件检索、多模态截图压缩上传 |
+| [`workstation/quota_wait.py`](../workstation/quota_wait.py) & [`model_router.py`](../workstation/model_router.py) | 限额自动续跑与紧迫度路由 | 重置时刻解析、错峰自动恢复（上限 3 次）、快作废额度优先选路 |
+| [`workstation/account_pool.py`](../workstation/account_pool.py) | 多订阅账号池隔离 | `CODEX_HOME` / `CLAUDE_CONFIG_DIR` 隔离、设备码授权、`is_account_authenticated` 守卫 |
+| [`workstation/review.py`](../workstation/review.py) & [`loop_guard.py`](../workstation/loop_guard.py) | 独立只读审查与死循环守卫 | 独立 `review` 会话、含未跟踪文件哈希的 Fail-Closed 新鲜度校验、分层工具空转拦截 |
+| [`workstation/input_handoff.py`](../workstation/input_handoff.py) & [`vision_bridge.py`](../workstation/vision_bridge.py) | 零留痕代输入与视觉桥 | `0600` 临时跨进程秘密传递（读取即毁）、纯文本模型多模态截图转译 |
+| [`workstation/fork.py`](../workstation/fork.py), [`webhooks.py`](../workstation/webhooks.py) & [`rich_ui.py`](../workstation/rich_ui.py) | 分叉、门铃触发与流式富组件 | 任意轮次 Fork、HMAC-SHA256 门铃防注入与冷却、语义配色 `rove-ui` 围栏协议 |
+| [`frontend/src/`](../frontend/src/) | React 19 响应式工作台 UI | 双主题视觉系统、思考流/执行计划/内联 Diff/`rove-ui` 渲染、精准路径点亮、多账号直登 |
 
 ---
 

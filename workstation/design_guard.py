@@ -8,7 +8,6 @@ accessible, modern design systems (Apple HIG / Linear / Vercel grade).
 import re
 from typing import Any, Dict, List, Optional
 
-from . import store as db
 from . import memories
 
 # Keyword triggers indicating frontend/UI intent
@@ -96,3 +95,37 @@ def seed_design_memory(project_id: str) -> Dict[str, Any]:
         category='convention',
         pinned=True,
     )
+
+
+HARDCODED_HEX_RE = re.compile(r'#[0-9a-fA-F]{3,8}\b')
+
+
+def audit_frontend_directory(
+    src_dir: str,
+    exemptions: Optional[set[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Scan frontend source files for Anti-AI-Slop violations and non-token hex literals."""
+    from pathlib import Path
+
+    root = Path(src_dir)
+    if not root.is_dir():
+        return []
+    exempt = exemptions or {'style.css', 'RoveMark.jsx'}
+    results: List[Dict[str, Any]] = []
+    for path in sorted(root.rglob('*')):
+        if path.suffix not in ('.jsx', '.tsx', '.js', '.ts', '.css') or not path.is_file():
+            continue
+        text = path.read_text(encoding='utf-8', errors='replace')
+        for finding in audit_code_changes(text):
+            results.append({'file': str(path.relative_to(root)), **finding})
+        if path.name not in exempt:
+            for m in HARDCODED_HEX_RE.finditer(text):
+                # Allow SVG/data URLs or CSS var fallbacks if explicitly marked
+                results.append({
+                    'file': str(path.relative_to(root)),
+                    'rule_id': 'hardcoded_hex_color',
+                    'matched': m.group(0),
+                    'advice': '组件层禁止硬编码十六进制色值，请使用 style.css 中的语义 CSS 变量。',
+                })
+                break
+    return results
