@@ -28,6 +28,8 @@ def generate_pbxproj():
 /* Begin PBXBuildFile section */
 		AA010001 /* RoveApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA020001 /* RoveApp.swift */; };
 		AA010002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA020002 /* ContentView.swift */; };
+		AA010003 /* RoveWatchApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA020006 /* RoveWatchApp.swift */; };
+		AA010004 /* WatchContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA020007 /* WatchContentView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -40,11 +42,22 @@ def generate_pbxproj():
 		AA020001 /* RoveApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoveApp.swift; sourceTree = "<group>"; };
 		AA020002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		AA020005 /* Info.plist (App) */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		AA020006 /* RoveWatchApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoveWatchApp.swift; sourceTree = "<group>"; };
+		AA020007 /* WatchContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchContentView.swift; sourceTree = "<group>"; };
+		AA020008 /* Info.plist (Watch) */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		AA020022 /* Rove.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Rove.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		AA020023 /* RoveWatch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RoveWatch.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		AA050001 /* Frameworks (App) */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AA050002 /* Frameworks (Watch) */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -58,6 +71,7 @@ def generate_pbxproj():
 			isa = PBXGroup;
 			children = (
 				AA060002 /* Rove */,
+				AA060003 /* RoveWatch */,
 				AA060004 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -72,10 +86,21 @@ def generate_pbxproj():
 			path = Rove;
 			sourceTree = "<group>";
 		};
+		AA060003 /* RoveWatch */ = {
+			isa = PBXGroup;
+			children = (
+				AA020006 /* RoveWatchApp.swift */,
+				AA020007 /* WatchContentView.swift */,
+				AA020008 /* Info.plist (Watch) */,
+			);
+			path = RoveWatch;
+			sourceTree = "<group>";
+		};
 		AA060004 /* Products */ = {
 			isa = PBXGroup;
 			children = (
 				AA020022 /* Rove.app */,
+				AA020023 /* RoveWatch.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -99,6 +124,22 @@ def generate_pbxproj():
 			productReference = AA020022 /* Rove.app */;
 			productType = "com.apple.product-type.application";
 		};
+		AA020020 /* RoveWatch Target (Watch) */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AA070002 /* Build configuration list for PBXNativeTarget "RoveWatch" */;
+			buildPhases = (
+				AA080002 /* Sources (Watch) */,
+				AA050002 /* Frameworks (Watch) */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = RoveWatch;
+			productName = RoveWatch;
+			productReference = AA020023 /* RoveWatch.app */;
+			productType = "com.apple.product-type.application";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -110,6 +151,9 @@ def generate_pbxproj():
 				LastUpgradeCheck = 1500;
 				TargetAttributes = {
 					AA020019 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+					AA020020 = {
 						CreatedOnToolsVersion = 15.0;
 					};
 				};
@@ -128,6 +172,7 @@ def generate_pbxproj():
 			projectRoot = "";
 			targets = (
 				AA020019 /* Rove */,
+				AA020020 /* RoveWatch */,
 			);
 		};
 /* End PBXProject section */
@@ -139,6 +184,15 @@ def generate_pbxproj():
 			files = (
 				AA010001 /* RoveApp.swift in Sources */,
 				AA010002 /* ContentView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AA080002 /* Sources (Watch) */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AA010003 /* RoveWatchApp.swift in Sources */,
+				AA010004 /* WatchContentView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -235,6 +289,44 @@ def generate_pbxproj():
 			};
 			name = Release;
 		};
+		AA0A0005 /* Debug (Watch) */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = RoveWatch/Info.plist;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.rove.companion.watchkitapp;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 9.0;
+			};
+			name = Debug;
+		};
+		AA0A0006 /* Release (Watch) */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = RoveWatch/Info.plist;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.rove.companion.watchkitapp;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 9.0;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -243,6 +335,15 @@ def generate_pbxproj():
 			buildConfigurations = (
 				AA0A0003 /* Debug */,
 				AA0A0004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		AA070002 /* Build configuration list for PBXNativeTarget "RoveWatch" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AA0A0005 /* Debug */,
+				AA0A0006 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

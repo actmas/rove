@@ -1675,7 +1675,7 @@ def verify_watch_token(token: str | None) -> bool:
 
 
 class WatchEinkDecision(BaseModel):
-    approval_id: str
+    approval_id: str | None = None
     decision: Literal['accept', 'decline', 'cancel']
 
 
@@ -1708,10 +1708,19 @@ def _active_approval_for_job(active_job: dict | None) -> dict | None:
     }
 
 
-def _commit_token_approval(approval_id: str, decision: str) -> dict:
+def _commit_token_approval(approval_id: str | None, decision: str) -> dict:
+    resolved_id = (approval_id or '').strip()
+    if not resolved_id:
+        latest = db.one(
+            "SELECT a.id FROM approvals a JOIN jobs j ON j.id=a.job_id "
+            "WHERE j.status='waiting' AND a.decision IS NULL ORDER BY a.created DESC LIMIT 1"
+        )
+        if not latest:
+            raise HTTPException(409, '当前没有待审批操作')
+        resolved_id = latest['id']
     value = db.one(
         "SELECT a.*, j.session_id, j.status FROM approvals a JOIN jobs j ON j.id=a.job_id WHERE a.id=?",
-        (approval_id,),
+        (resolved_id,),
     )
     if not value or value['status'] != 'waiting':
         raise HTTPException(409, '审批已失效或任务已结束')
@@ -1719,9 +1728,10 @@ def _commit_token_approval(approval_id: str, decision: str) -> dict:
         raise HTTPException(409, '该审批已被处理')
     if value['method'] == 'item/tool/requestUserInput':
         raise HTTPException(409, '请在 iPhone 或网页端回答此问题')
-    if not db.decide_approval(approval_id, decision):
+    if not db.decide_approval(resolved_id, decision):
         raise HTTPException(409, '审批已处理或任务已结束')
-    return {'ok': True, 'approval_id': approval_id, 'decision': decision}
+    msg = '✓ 已批准执行' if decision == 'accept' else '✕ 已拒绝操作'
+    return {'ok': True, 'approval_id': resolved_id, 'decision': decision, 'message': msg}
 
 
 @app.get('/api/watch/status')

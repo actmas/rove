@@ -751,7 +751,7 @@ export default function SettingsPanel({
           <section>
             <h3>⌚ Apple Watch 与手机快捷审批</h3>
             <p className="setting-description">
-              在 iPhone 主屏幕 Rove App 开启锁屏推送后，待审批提醒会自动镜像至配对的 Apple Watch；也可将下方 Watch 实时审批页加入快捷指令，在手表上直接「批准 / 拒绝」。
+              注：iOS / watchOS 系统限制网页推送镜像到手表时仅显示通知正文（无法在系统通知卡片直接出按钮）。要在 Apple Watch 上<strong>直接审批</strong>，推荐在 iPhone「快捷指令」新建一步 <code>POST</code> 快捷指令并同步到手表/操作按钮，或使用 <code>ios-companion</code> 中的原生 <code>RoveWatch</code> 手表应用。
             </p>
             <div className="engine-line">
               <span>已绑定手机推送设备</span>
@@ -763,7 +763,38 @@ export default function SettingsPanel({
               <>
                 <div className="pve-deploy-hint">
                   <div className="engine-line">
-                    <strong>Watch 实时监控与快速审批页：</strong>
+                    <strong>快捷指令 1 步审批接口 (POST URL，可省略 approval_id 自动批准最新请求)：</strong>
+                    <button
+                      type="button"
+                      className="icon-button"
+                      title="复制快捷指令审批接口"
+                      aria-label="复制快捷指令审批接口"
+                      onClick={() => copyWatchText('approve', watchConfig.approve_url)}
+                    >
+                      {copiedWatchKey === 'approve' ? <Check size={13}/> : <Copy size={13}/>}
+                    </button>
+                  </div>
+                  <code>{watchConfig.approve_url}</code>
+                  <div className="button-row" style={{marginTop: 6}}>
+                    <button
+                      type="button"
+                      onClick={() => copyWatchText('json_accept', '{"decision":"accept"}')}
+                    >
+                      {copiedWatchKey === 'json_accept' ? <Check size={13}/> : <Copy size={13}/>}
+                      复制批准 JSON
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => copyWatchText('json_decline', '{"decision":"decline"}')}
+                    >
+                      {copiedWatchKey === 'json_decline' ? <Check size={13}/> : <Copy size={13}/>}
+                      复制拒绝 JSON
+                    </button>
+                  </div>
+                </div>
+                <div className="pve-deploy-hint" style={{marginTop: 8}}>
+                  <div className="engine-line">
+                    <strong>Watch 实时监控与快速审批页 (Watch Token: <code>{watchConfig.token}</code>)：</strong>
                     <button
                       type="button"
                       className="icon-button"

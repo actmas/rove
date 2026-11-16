@@ -1472,6 +1472,25 @@ class WorkstationTests(unittest.TestCase):
             self.assertEqual(dup_res.status_code, 409)
             db.execute("UPDATE jobs SET status='completed', ended=? WHERE id=?", (time.time(), jid))
 
+            # Verify 1-step Shortcuts approval without explicit approval_id auto-resolves latest pending
+            jid2 = secrets.token_hex(12)
+            aid2 = secrets.token_hex(12)
+            db.execute(
+                "INSERT INTO jobs(id,session_id,request_id,prompt,status,started,engine) VALUES(?,?,?,?,'waiting',?,'codex')",
+                (jid2, sid, secrets.token_hex(8), 'git status', time.time()),
+            )
+            db.execute(
+                'INSERT INTO approvals VALUES(?,?,?,?,NULL,?)',
+                (aid2, jid2, 'item/commandExecution/requestApproval', json.dumps({'command': 'git status'}), time.time()),
+            )
+            auto_res = self.client.post(f'/api/watch/approve?token={token}', json={'decision': 'accept'})
+            self.assertEqual(auto_res.status_code, 200)
+            self.assertEqual(auto_res.json()['approval_id'], aid2)
+            self.assertEqual(db.one('SELECT decision FROM approvals WHERE id=?', (aid2,))['decision'], 'accept')
+            no_pending_res = self.client.post(f'/api/watch/approve?token={token}', json={'decision': 'accept'})
+            self.assertEqual(no_pending_res.status_code, 409)
+            db.execute("UPDATE jobs SET status='completed', ended=? WHERE id=?", (time.time(), jid2))
+
             # 6. Eink View endpoints
             eink_page_res = self.client.get(f'/eink?token={token}')
             self.assertEqual(eink_page_res.status_code, 200)
