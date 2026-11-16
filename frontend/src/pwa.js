@@ -277,10 +277,11 @@ export function usePwaManager(webPushState, onRefresh) {
     if (onRefresh) await onRefresh();
   }, [localEndpointHash, onRefresh, serverSubscriptions]);
 
-  const sendTestPush = useCallback(async activeSessionId => {
+  const sendTestPush = useCallback(async (activeSessionId, kind = 'test') => {
     return await post('push/test', {
-      endpoint: localEndpoint || null,
+      endpoint: kind === 'approval' ? null : (localEndpoint || null),
       session_id: activeSessionId || null,
+      kind,
     });
   }, [localEndpoint]);
 

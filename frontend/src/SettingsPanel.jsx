@@ -32,6 +32,10 @@ export default function SettingsPanel({
   const [pushBusy, setPushBusy] = useState(false);
   const [testingPush, setTestingPush] = useState(false);
   const [pwaNotice, setPwaNotice] = useState('');
+  const [watchConfig, setWatchConfig] = useState(null);
+  const [watchBusy, setWatchBusy] = useState(false);
+  const [watchNotice, setWatchNotice] = useState('');
+  const [copiedWatchKey, setCopiedWatchKey] = useState('');
   const [error, setError] = useState('');
   const [checked, setChecked] = useState(null);
   const antigravity = checked || engines.antigravity;
@@ -136,6 +140,9 @@ export default function SettingsPanel({
     let mounted = true;
     getAgentsHub().then(data => {
       if (mounted && data) setAgentsHub(data);
+    }).catch(() => {});
+    api('watch/config').then(data => {
+      if (mounted && data) setWatchConfig(data);
     }).catch(() => {});
     getClusterStatus().then(data => {
       if (mounted && data) {
@@ -421,22 +428,30 @@ export default function SettingsPanel({
     }
   }
 
-  async function handleTestPush() {
+  async function handleTestPush(kind = 'test') {
     if (!pwa) return;
     setTestingPush(true);
     setError('');
     setPwaNotice('');
+    setWatchNotice('');
     try {
-      const res = await pwa.sendTestPush(activeSessionId);
+      const res = await pwa.sendTestPush(activeSessionId, kind);
+      const isApproval = kind === 'approval';
       if (res.sent > 0) {
-        setPwaNotice(`测试推送已送达（${res.sent} 台设备），请查看系统通知栏或锁屏界面。`);
+        const msg = isApproval
+          ? `模拟审批推送已发送至 ${res.sent} 台已绑定设备（锁屏 iPhone 将自动镜像至配对 Apple Watch）。`
+          : `测试推送已送达（${res.sent} 台设备），请查看系统通知栏或锁屏界面。`;
+        setPwaNotice(msg);
+        if (isApproval) setWatchNotice(msg);
       } else if (res.failed > 0 || (res.errors && res.errors.length > 0)) {
         const errDetail = (res.errors || []).join('；') || '推送网关拒绝请求';
         setError(`推送发送失败（${res.failed || 1} 台设备）：${errDetail}`);
       } else if (res.removed > 0) {
         setPwaNotice('原订阅端点已失效并自动清理，请重新点击「开启本机锁屏推送」。');
       } else {
-        setPwaNotice('当前没有有效的订阅端点，请先点击「开启本机锁屏推送」。');
+        const msg = '当前没有已绑定的手机推送设备，请先在 iPhone 主屏幕 Rove App 中开启锁屏推送。';
+        setPwaNotice(msg);
+        if (isApproval) setWatchNotice(msg);
       }
       if (onRefresh) await onRefresh();
     } catch (e) {
@@ -444,6 +459,28 @@ export default function SettingsPanel({
     } finally {
       setTestingPush(false);
     }
+  }
+
+  async function handleRotateWatchToken() {
+    setWatchBusy(true);
+    setError('');
+    setWatchNotice('');
+    try {
+      const next = await post('watch/rotate');
+      setWatchConfig(next);
+      setWatchNotice('已生成新的 Watch / 墨水屏访问 Token，原链接已失效。');
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setWatchBusy(false);
+    }
+  }
+
+  function copyWatchText(key, value) {
+    if (!value) return;
+    navigator.clipboard?.writeText(value);
+    setCopiedWatchKey(key);
+    setTimeout(() => setCopiedWatchKey(prev => (prev === key ? '' : prev)), 1800);
   }
 
   async function handleRemovePushDevice(id) {
@@ -655,10 +692,16 @@ export default function SettingsPanel({
                 )}
 
                 {(pwa.isSubscribed || (pwa.serverSubscriptions?.length > 0)) && (
-                  <button type="button" onClick={handleTestPush} disabled={testingPush}>
-                    <Send size={14}/>
-                    {testingPush ? '正在发送…' : '发送测试通知'}
-                  </button>
+                  <>
+                    <button type="button" onClick={() => handleTestPush('test')} disabled={testingPush}>
+                      <Send size={14}/>
+                      {testingPush ? '正在发送…' : '发送测试通知'}
+                    </button>
+                    <button type="button" onClick={() => handleTestPush('approval')} disabled={testingPush}>
+                      <Bell size={14}/>
+                      {testingPush ? '正在发送…' : '发送审批测试推送'}
+                    </button>
+                  </>
                 )}
               </div>
 
@@ -704,6 +747,95 @@ export default function SettingsPanel({
               )}
             </section>
           )}
+
+          <section>
+            <h3>⌚ Apple Watch 与手机快捷审批</h3>
+            <p className="setting-description">
+              在 iPhone 主屏幕 Rove App 开启锁屏推送后，待审批提醒会自动镜像至配对的 Apple Watch；也可将下方 Watch 实时审批页加入快捷指令，在手表上直接「批准 / 拒绝」。
+            </p>
+            <div className="engine-line">
+              <span>已绑定手机推送设备</span>
+              <span className={`engine-label ${(pwa?.serverSubscriptions?.length || 0) > 0 ? 'ready' : ''}`}>
+                {pwa?.serverSubscriptions?.length || 0} 台
+              </span>
+            </div>
+            {watchConfig ? (
+              <>
+                <div className="pve-deploy-hint">
+                  <div className="engine-line">
+                    <strong>Watch 实时监控与快速审批页：</strong>
+                    <button
+                      type="button"
+                      className="icon-button"
+                      title="复制 Watch 审批页链接"
+                      aria-label="复制 Watch 审批页链接"
+                      onClick={() => copyWatchText('live', watchConfig.live_url)}
+                    >
+                      {copiedWatchKey === 'live' ? <Check size={13}/> : <Copy size={13}/>}
+                    </button>
+                  </div>
+                  <code>{watchConfig.live_url}</code>
+                </div>
+                <div className="pve-deploy-hint" style={{marginTop: 8}}>
+                  <div className="engine-line">
+                    <strong>快捷指令待审批查询接口 (JSON / Text)：</strong>
+                    <button
+                      type="button"
+                      className="icon-button"
+                      title="复制快捷指令查询接口"
+                      aria-label="复制快捷指令查询接口"
+                      onClick={() => copyWatchText('pending', watchConfig.pending_url)}
+                    >
+                      {copiedWatchKey === 'pending' ? <Check size={13}/> : <Copy size={13}/>}
+                    </button>
+                  </div>
+                  <code>{watchConfig.pending_url}</code>
+                </div>
+                <div className="button-row" style={{marginTop: 10}}>
+                  <button
+                    type="button"
+                    className="primary"
+                    onClick={() => window.open(watchConfig.live_url, '_blank', 'noopener,noreferrer')}
+                  >
+                    <ExternalLink size={14}/>
+                    打开 Watch 审批页
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleTestPush('approval')}
+                    disabled={testingPush || !(pwa?.serverSubscriptions?.length > 0)}
+                    title={pwa?.serverSubscriptions?.length > 0 ? '向已绑定手机发送模拟审批推送（锁屏时自动镜像至 Apple Watch）' : '请先在 iPhone 主屏幕 App 开启锁屏推送'}
+                  >
+                    <Bell size={14}/>
+                    {testingPush ? '正在发送…' : '测试手机/手表审批推送'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => window.open(watchConfig.eink_url, '_blank', 'noopener,noreferrer')}
+                  >
+                    <ExternalLink size={14}/>
+                    墨水屏审批台
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleRotateWatchToken}
+                    disabled={watchBusy}
+                  >
+                    <RotateCcw size={14} className={watchBusy ? 'spinning' : ''}/>
+                    轮换 Watch Token
+                  </button>
+                </div>
+              </>
+            ) : (
+              <p className="setting-description">正在加载 Watch 审批配置…</p>
+            )}
+            {watchNotice && (
+              <small className="sync-feedback">
+                <CheckCircle2 size={12} style={{verticalAlign: '-2px', marginRight: 4}}/>
+                {watchNotice}
+              </small>
+            )}
+          </section>
 
           <section>
             <h3>📱 屏幕显示与防休眠</h3>

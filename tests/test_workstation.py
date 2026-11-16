@@ -1490,6 +1490,24 @@ class WorkstationTests(unittest.TestCase):
             self.assertIn('session_title', state_json)
             self.assertIn('project_name', state_json)
             self.assertIn('git_branch', state_json)
+
+            # 7. Rotate watch token invalidates old token
+            rot_res = self.post('watch/rotate')
+            self.assertEqual(rot_res.status_code, 200)
+            new_token = rot_res.json()['token']
+            self.assertNotEqual(new_token, token)
+            self.assertEqual(self.client.get(f'/api/watch/pending?token={token}').status_code, 401)
+            self.assertEqual(self.client.get(f'/api/watch/pending?token={new_token}').status_code, 200)
+
+            # 8. Push test with kind='approval' sends approval preview push to bound devices
+            from unittest.mock import AsyncMock, patch
+            with patch('workstation.webpush.notify_all', new=AsyncMock(return_value={'ok': True, 'sent': 1, 'failed': 0, 'removed': 0, 'errors': []})) as mock_push:
+                push_res = self.post('push/test', {'kind': 'approval'})
+            self.assertEqual(push_res.status_code, 200)
+            self.assertEqual(push_res.json()['sent'], 1)
+            self.assertEqual(mock_push.await_args.kwargs['kind'], 'approval')
+            self.assertEqual(mock_push.await_args.kwargs['approval_id'], 'test-preview')
+            self.assertEqual([a['action'] for a in mock_push.await_args.kwargs['actions']], ['accept', 'decline'])
         finally:
             quotas._CACHE.clear()
 

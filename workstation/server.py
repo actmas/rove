@@ -1933,6 +1933,12 @@ async def watch_live_page(token: str | None = None):
     return FileResponse(html_file, media_type='text/html; charset=utf-8')
 
 
+@app.post('/api/watch/rotate')
+async def watch_rotate(request: Request):
+    rotate_watch_token()
+    return await watch_config(request)
+
+
 @app.get('/api/watch/config')
 async def watch_config(request: Request):
     token = get_watch_token()
@@ -2314,6 +2320,7 @@ class PushUnsubscribeBody(BaseModel):
 class PushTestBody(BaseModel):
     endpoint: str | None = Field(default=None, max_length=2048)
     session_id: str | None = Field(default=None, max_length=64)
+    kind: Literal['test', 'approval'] = 'test'
 
 
 @app.get('/api/push/status')
@@ -2345,15 +2352,31 @@ async def push_unsubscribe(body: PushUnsubscribeBody):
 @app.post('/api/push/test')
 async def push_test(body: PushTestBody | None = None):
     req = body or PushTestBody()
-    result = await webpush.notify_all(
-        title='Rove · 锁屏推送已连通',
-        body='后台 Codex / Antigravity 任务完成或等待审批时，将实时推送到此设备。',
-        session_id=req.session_id,
-        tag='workstation-test',
-        kind='test',
-        require_interaction=False,
-        target_endpoint=req.endpoint,
-    )
+    if req.kind == 'approval':
+        result = await webpush.notify_all(
+            title='Rove · 审批测试推送',
+            body='测试操作：git status（用于验证 iPhone 锁屏与 Apple Watch 镜像审批提醒）',
+            session_id=req.session_id,
+            approval_id='test-preview',
+            actions=[
+                {'action': 'accept', 'title': '✓ 批准执行'},
+                {'action': 'decline', 'title': '✕ 拒绝'},
+            ],
+            tag='workstation-approval-test',
+            kind='approval',
+            require_interaction=True,
+            target_endpoint=req.endpoint,
+        )
+    else:
+        result = await webpush.notify_all(
+            title='Rove · 锁屏推送已连通',
+            body='后台 Codex / Antigravity 任务完成或等待审批时，将实时推送到此设备。',
+            session_id=req.session_id,
+            tag='workstation-test',
+            kind='test',
+            require_interaction=False,
+            target_endpoint=req.endpoint,
+        )
     return {**result, 'web_push': webpush.get_push_status()}
 
 
