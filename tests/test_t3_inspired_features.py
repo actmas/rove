@@ -45,6 +45,9 @@ class T3InspiredFeaturesTests(unittest.TestCase):
         db.DATA = self.orig_data
         self.temp.cleanup()
 
+    def get(self, path):
+        return self.client.get('/api/' + path, headers=self.headers)
+
     def post(self, path, body=None):
         return self.client.post('/api/' + path, json=body or {}, headers=self.headers)
 
@@ -158,6 +161,85 @@ for line in sys.stdin:
         self.assertEqual(outcome['status'], 'completed')
         evs = db.query('SELECT payload FROM events WHERE session_id=? AND job_id=?', (sess['id'], job_id))
         self.assertTrue(any('ACP_OK' in (ev.get('payload') or '') for ev in evs))
+
+    def test_5_fixed_turn_diff_and_conflict_checked_revert(self):
+        proj = self.post('projects', {'path': str(self.project)}).json()
+        sess = self.post('sessions', {'project_id': proj['id'], 'engine': 'codex'}).json()
+        job1 = 'job1_' + secrets.token_hex(6)
+        job2 = 'job2_' + secrets.token_hex(6)
+        t1 = time.time() - 10
+        t2 = time.time() - 5
+
+        before1 = checkpoints.capture_checkpoint(str(self.project), sess['id'], job1, phase='before')
+        (self.project / 'main.py').write_text("print('turn1')\n", encoding='utf-8')
+        after1 = checkpoints.capture_checkpoint(str(self.project), sess['id'], job1, phase='after')
+        db.execute(
+            'INSERT INTO jobs(id,session_id,request_id,prompt,status,started,checkpoint_ref,checkpoint_after_ref) VALUES(?,?,?,?,?,?,?,?)',
+            (job1, sess['id'], secrets.token_hex(8), 'turn 1', 'completed', t1, before1, after1),
+        )
+
+        # Turn 2 modifies another file; turn 1's diff must remain scoped to main.py only!
+        before2 = checkpoints.capture_checkpoint(str(self.project), sess['id'], job2, phase='before')
+        (self.project / 'later.txt').write_text('later change\n', encoding='utf-8')
+        after2 = checkpoints.capture_checkpoint(str(self.project), sess['id'], job2, phase='after')
+        db.execute(
+            'INSERT INTO jobs(id,session_id,request_id,prompt,status,started,checkpoint_ref,checkpoint_after_ref) VALUES(?,?,?,?,?,?,?,?)',
+            (job2, sess['id'], secrets.token_hex(8), 'turn 2', 'completed', t2, before2, after2),
+        )
+
+        d1 = self.get(f"sessions/{sess['id']}/jobs/{job1}/diff").json()
+        self.assertTrue(d1['available'])
+        self.assertTrue(d1['scoped'])
+        self.assertIn('turn1', d1['diff'])
+        self.assertNotIn('later change', d1['diff'])
+
+        # Reverting job1 without force should warn about later job2
+        r_warn = self.post(f"sessions/{sess['id']}/jobs/{job1}/revert", {}).json()
+        self.assertFalse(r_warn['ok'])
+        self.assertTrue(r_warn['requires_confirm'])
+        self.assertEqual(r_warn['later_jobs_count'], 1)
+        self.assertTrue((self.project / 'later.txt').exists())
+
+        # Force revert restores pre-turn-1 state
+        r_force = self.post(f"sessions/{sess['id']}/jobs/{job1}/revert", {'force': True}).json()
+        self.assertTrue(r_force['ok'])
+        self.assertFalse((self.project / 'later.txt').exists())
+
+    def test_6_queue_pause_handoff_preview_and_diagnostics(self):
+        proj = self.post('projects', {'path': str(self.project)}).json()
+        sess = self.post('sessions', {'project_id': proj['id'], 'engine': 'codex'}).json()
+
+        q_add = self.post(f"sessions/{sess['id']}/queue", {'text': 'queued task 1'}).json()
+        self.assertEqual(q_add['prompt'], 'queued task 1')
+
+        p_res = self.post(f"sessions/{sess['id']}/queue/pause", {'paused': True}).json()
+        self.assertTrue(p_res['paused'])
+
+        q_list = self.get(f"sessions/{sess['id']}/queue").json()
+        self.assertTrue(q_list['paused'])
+        self.assertFalse(q_list['supports_live_steer'])
+        self.assertEqual(len(q_list['queue']), 1)
+
+        # Add 6 turns so handoff-preview has omitted history
+        for idx in range(6):
+            jid = f'hj_{idx}_' + secrets.token_hex(4)
+            ts = time.time() + idx
+            db.execute(
+                "INSERT INTO jobs(id,session_id,request_id,prompt,status,started,engine) VALUES(?,?,?,?,'completed',?,'codex')",
+                (jid, sess['id'], secrets.token_hex(8), f'turn {idx} prompt', ts),
+            )
+            db.event(sess['id'], jid, 'user', {'text': f'turn {idx} prompt'})
+            db.event(sess['id'], jid, 'assistant_delta', {'text': f'turn {idx} reply'})
+
+        hp = self.get(f"sessions/{sess['id']}/handoff-preview?target_engine=antigravity").json()
+        self.assertTrue(hp['needed'])
+        self.assertEqual(hp['total_turns'], 6)
+        self.assertEqual(hp['included_turns'], 4)
+        self.assertEqual(hp['omitted_count'], 2)
+
+        diag = self.get('diagnostics').json()
+        self.assertTrue(diag['ok'])
+        self.assertIn('engines', diag)
 
 
 if __name__ == '__main__':

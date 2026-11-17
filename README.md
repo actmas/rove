@@ -167,6 +167,9 @@ cat ~/.config/walking-workstation/access-password.txt
 | 局域网 | 手机与工作站连接同一网络 | `http://工作站局域网IP:8765` |
 | Tailscale Serve | 自己的设备通过 Tailscale 远程连接 | Serve 输出的 HTTPS 地址 |
 | Cloudflare Tunnel + Access | 使用自定义域名，通过浏览器从外网登录 | `https://rove.example.com` |
+| frp / Caddy / Nginx 反代 | 已有公网 VPS，自建 HTTPS 域名转发（需开启 WebSocket） | `https://rove.example.com` |
+
+> **手机 PWA 安装**：通过 HTTPS 地址在 iPhone Safari（点击「分享 → 添加到主屏幕」）或 Android Chrome（点击「安装应用」）打开后，即可作为独立全屏 App 运行，并支持锁屏 Web Push 审批提醒。
 
 ### 局域网访问
 
@@ -214,10 +217,10 @@ tailscale serve --bg http://127.0.0.1:8765
 
 ## 常见使用场景
 
-- **手机 Vibe Coding** — 外出时通过网页继续电脑上的 AI 编程任务。
-- **Codex / Claude Code Web UI** — 把已配置的命令行编程工具集中到浏览器界面。
-- **跨模型协作编程** — 在统一会话中切换模型或引擎，接续分析、实现与代码审查。
-- **自托管 AI 编程助手** — 在 Mac mini、Linux 主机或 PVE 环境运行，连接本地仓库和终端。
+- **手机 Vibe Coding（Web Vibe Coding）** — 外出时通过手机或平板浏览器 / PWA 继续电脑上的 AI 编程任务，支持离线草稿恢复与排队控制。
+- **Codex / Claude Code / Gemini CLI Web UI** — 把本机已授权的命令行与桌面 AI 编程工具集中到同一个网页工作台。
+- **跨模型协作与单轮回滚** — 在统一会话中切换模型或引擎，可检查交接上下文，并支持单轮固定 Diff 与一键检查点回滚。
+- **自托管 AI 编程助手** — 在 Mac mini、Linux 主机或 PVE 环境运行，通过 Tailscale / Cloudflare Tunnel / frp 安全连接本地仓库和终端。
 
 ## Configuration & Operations
 

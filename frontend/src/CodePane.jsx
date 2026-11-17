@@ -5,7 +5,8 @@ import {
 } from 'lucide-react';
 import {api, parseUnifiedDiff, fileUrl, downloadFile, fileMetaApiPath, formatFileSize, gitCommitProject, gitPushProject} from './api';
 
-function FileDiffCard({item, onOpenFile, onMentionFile}) {
+function FileDiffCard({item, onOpenFile, onMentionFile, onAskDiffLine}) {
+  const [selectedIdx, setSelectedIdx] = useState(null);
   return (
     <details className="diff-card" open>
       <summary className="diff-card-header">
@@ -31,13 +32,42 @@ function FileDiffCard({item, onOpenFile, onMentionFile}) {
       <div className="diff-table-wrap">
         <table className="diff-table">
           <tbody>
-            {item.rows.map((row, idx) => (
-              <tr key={idx} className={`diff-row ${row.type}`}>
-                <td className="ln">{row.oldNum}</td>
-                <td className="ln">{row.newNum}</td>
-                <td className="code">{row.text}</td>
-              </tr>
-            ))}
+            {item.rows.map((row, idx) => {
+              const lineNo = row.newNum || row.oldNum || '';
+              const canAsk = !!onAskDiffLine && row.type !== 'hunk' && !!lineNo;
+              const isSelected = selectedIdx === idx;
+              return (
+                <tr
+                  key={idx}
+                  className={`diff-row ${row.type}${isSelected ? ' diff-row-selected' : ''}`}
+                  onClick={() => canAsk && setSelectedIdx(isSelected ? null : idx)}
+                  style={canAsk ? {cursor: 'pointer'} : undefined}
+                >
+                  <td className="ln">{row.oldNum}</td>
+                  <td className="ln">{row.newNum}</td>
+                  <td className="code">
+                    <span>{row.text}</span>
+                    {canAsk && isSelected && (
+                      <button
+                        type="button"
+                        className="diff-ask-btn"
+                        onClick={e => {
+                          e.stopPropagation();
+                          onAskDiffLine({
+                            path: item.path,
+                            line: lineNo,
+                            code: row.text,
+                          });
+                          setSelectedIdx(null);
+                        }}
+                      >
+                        针对此行继续修改
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -45,7 +75,7 @@ function FileDiffCard({item, onOpenFile, onMentionFile}) {
   );
 }
 
-export default function CodePane({project, sessionId, onError, initialFile, onConsumeInitialFile, onMentionFile}) {
+export default function CodePane({project, sessionId, onError, initialFile, onConsumeInitialFile, onMentionFile, onAskDiffLine}) {
   const [diff, setDiff] = useState(null);
   const [files, setFiles] = useState([]);
   const [path, setPath] = useState('');
@@ -318,6 +348,7 @@ export default function CodePane({project, sessionId, onError, initialFile, onCo
                       item={item}
                       onOpenFile={openFileByPath}
                       onMentionFile={onMentionFile}
+                      onAskDiffLine={onAskDiffLine}
                     />
                   ))}
                 </div>
@@ -332,6 +363,7 @@ export default function CodePane({project, sessionId, onError, initialFile, onCo
                       item={item}
                       onOpenFile={openFileByPath}
                       onMentionFile={onMentionFile}
+                      onAskDiffLine={onAskDiffLine}
                     />
                   ))}
                 </div>

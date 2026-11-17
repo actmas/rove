@@ -208,8 +208,8 @@ export function formatFileSize(bytes) {
 export const getJobTurnDiff = (sessionId, jobId) =>
   api(`sessions/${encodeURIComponent(sessionId)}/jobs/${encodeURIComponent(jobId)}/diff`);
 
-export const revertJobCheckpoint = (sessionId, jobId) =>
-  post(`sessions/${encodeURIComponent(sessionId)}/jobs/${encodeURIComponent(jobId)}/revert`, {});
+export const revertJobCheckpoint = (sessionId, jobId, force = false) =>
+  post(`sessions/${encodeURIComponent(sessionId)}/jobs/${encodeURIComponent(jobId)}/revert`, {force: !!force});
 
 export const promoteScratchSession = (sessionId, payload = {}) =>
   post(`sessions/${encodeURIComponent(sessionId)}/promote`, payload);
@@ -404,5 +404,35 @@ export function pushClusterSnapshot(options = {}) {
 
 export function pullClusterSnapshot(options = {}) {
   return post('cluster/pull', options, {timeoutMs: 180000});
+}
+
+export function getSessionQueue(sessionId) {
+  return api(`sessions/${encodeURIComponent(sessionId)}/queue`);
+}
+
+export function enqueueSessionMessage(sessionId, payload) {
+  return post(`sessions/${encodeURIComponent(sessionId)}/queue`, payload);
+}
+
+export function updateQueuedMessage(queueId, payload) {
+  return patch(`queue/${encodeURIComponent(queueId)}`, payload);
+}
+
+export function cancelQueuedMessage(queueId) {
+  return del(`queue/${encodeURIComponent(queueId)}`);
+}
+
+export function pauseSessionQueue(sessionId, paused) {
+  return post(`sessions/${encodeURIComponent(sessionId)}/queue/pause`, {paused: !!paused});
+}
+
+export function getHandoffPreview(sessionId, targetEngine, targetModel = '') {
+  const qs = new URLSearchParams({target_engine: targetEngine});
+  if (targetModel) qs.set('target_model', targetModel);
+  return api(`sessions/${encodeURIComponent(sessionId)}/handoff-preview?${qs.toString()}`);
+}
+
+export function getWorkstationDiagnostics() {
+  return api('diagnostics');
 }
 

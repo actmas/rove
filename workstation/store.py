@@ -469,6 +469,7 @@ def init():
             'external_stopped_at': 'REAL NOT NULL DEFAULT 0',
             'external_stopped_marker': "TEXT NOT NULL DEFAULT ''",
             'pruned_through_seq': 'INTEGER NOT NULL DEFAULT 0',
+            'queue_paused': 'INTEGER NOT NULL DEFAULT 0',
         })
         _ensure_columns(db, 'projects', {
             'is_scratch': 'INTEGER NOT NULL DEFAULT 0',
@@ -478,6 +479,7 @@ def init():
             'cloud_environment': "TEXT NOT NULL DEFAULT ''",
             'cloud_task_id': 'TEXT',
             'checkpoint_ref': "TEXT NOT NULL DEFAULT ''",
+            'checkpoint_after_ref': "TEXT NOT NULL DEFAULT ''",
             'reverted': 'INTEGER NOT NULL DEFAULT 0',
             'model': 'TEXT',
             'effort': 'TEXT',

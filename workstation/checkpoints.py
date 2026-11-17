@@ -39,17 +39,18 @@ def _is_git_repo_with_head(workdir: str) -> bool:
     return head.returncode == 0
 
 
-def checkpoint_ref_name(session_id: str, job_id: str) -> str:
+def checkpoint_ref_name(session_id: str, job_id: str, phase: str = 'before') -> str:
     if not SAFE_ID_RE.match(session_id) or not SAFE_ID_RE.match(job_id):
         raise ValueError('Invalid session or job identifier for checkpoint')
-    return f'refs/rove/checkpoints/{session_id}/{job_id}'
+    suffix = '-after' if phase == 'after' else ''
+    return f'refs/rove/checkpoints/{session_id}/{job_id}{suffix}'
 
 
-def capture_checkpoint(workdir: str, session_id: str, job_id: str) -> str:
+def capture_checkpoint(workdir: str, session_id: str, job_id: str, phase: str = 'before') -> str:
     """Snapshot working tree (tracked + untracked) into a hidden Git ref without altering HEAD or index."""
     if not _is_git_repo_with_head(workdir):
         return ''
-    ref = checkpoint_ref_name(session_id, job_id)
+    ref = checkpoint_ref_name(session_id, job_id, phase=phase)
     tmp_fd, tmp_index = tempfile.mkstemp(prefix='rove-idx-')
     os.close(tmp_fd)
     # Remove the empty file so Git initializes a fresh temporary index cleanly.
@@ -79,17 +80,37 @@ def capture_checkpoint(workdir: str, session_id: str, job_id: str) -> str:
             os.unlink(tmp_index)
 
 
-def diff_checkpoint(workdir: str, checkpoint_ref: str) -> Dict[str, Any]:
-    """Compute a turn-scoped diff between a hidden checkpoint ref and the current working tree."""
+def diff_checkpoint(workdir: str, checkpoint_ref: str, checkpoint_after_ref: str = '') -> Dict[str, Any]:
+    """Compute a turn-scoped diff between before/after checkpoint refs (or working tree while running)."""
     if not checkpoint_ref or not _is_git_repo_with_head(workdir):
-        return {'available': False, 'diff': '', 'files': [], 'summary': ''}
+        return {'available': False, 'scoped': False, 'diff': '', 'files': [], 'summary': ''}
     verify = _git(['rev-parse', '--verify', checkpoint_ref], workdir, check=False)
     if verify.returncode != 0:
-        return {'available': False, 'diff': '', 'files': [], 'summary': ''}
+        return {'available': False, 'scoped': False, 'diff': '', 'files': [], 'summary': ''}
+
+    after_ref = (checkpoint_after_ref or '').strip()
+    after_ok = bool(after_ref and _git(['rev-parse', '--verify', after_ref], workdir, check=False).returncode == 0)
+    if after_ok:
+        tracked_diff = _git(['diff', checkpoint_ref, after_ref, '--'], workdir, check=False).stdout
+        name_status = _git(['diff', '--name-status', checkpoint_ref, after_ref, '--'], workdir, check=False).stdout
+        files: List[Dict[str, str]] = []
+        for line in name_status.splitlines():
+            parts = line.split('\t', 1)
+            if len(parts) == 2:
+                files.append({'status': parts[0].strip(), 'path': parts[1].strip()})
+        return {
+            'available': True,
+            'scoped': True,
+            'checkpoint_ref': checkpoint_ref,
+            'checkpoint_after_ref': after_ref,
+            'files': files,
+            'diff': tracked_diff[:200000],
+            'summary': f'{len(files)} 个文件发生变更（单轮固定快照）',
+        }
 
     tracked_diff = _git(['diff', checkpoint_ref, '--'], workdir, check=False).stdout
     name_status = _git(['diff', '--name-status', checkpoint_ref, '--'], workdir, check=False).stdout
-    files: List[Dict[str, str]] = []
+    files = []
     for line in name_status.splitlines():
         parts = line.split('\t', 1)
         if len(parts) == 2:
@@ -111,14 +132,39 @@ def diff_checkpoint(workdir: str, checkpoint_ref: str) -> Dict[str, Any]:
         full_diff = (full_diff.rstrip('\n') + '\n' + '\n'.join(extra_diffs)).lstrip('\n')
     return {
         'available': True,
+        'scoped': False,
         'checkpoint_ref': checkpoint_ref,
         'files': files,
         'diff': full_diff[:200000],
-        'summary': f'{len(files)} 个文件发生变更',
+        'summary': f'{len(files)} 个文件发生变更（实时工作区）',
     }
 
 
-def revert_to_checkpoint(workdir: str, session_id: str, job_id: str) -> Dict[str, Any]:
+def _check_revert_conflicts(workdir: str, session_id: str, job: Dict[str, Any]) -> Dict[str, Any]:
+    started_at = float(job.get('started') or 0)
+    later = db.query(
+        'SELECT id FROM jobs WHERE session_id=? AND id!=? AND COALESCE(reverted, 0)=0 AND COALESCE(started, 0) > ?',
+        (session_id, job['id'], started_at),
+    )
+    active_rows = db.query(
+        "SELECT j.id AS job_id, j.session_id, s.title, s.project_id, s.use_worktree, s.worktree_path "
+        "FROM jobs j JOIN sessions s ON s.id=j.session_id "
+        "WHERE j.session_id!=? AND j.status IN ('queued','running','waiting_approval','waiting_question')",
+        (session_id,),
+    )
+    norm_workdir = str(Path(workdir).resolve())
+    other_active: List[Dict[str, str]] = []
+    for row in active_rows:
+        sess_proj = db.one('SELECT * FROM projects WHERE id=?', (row.get('project_id'),))
+        if not sess_proj:
+            continue
+        other_wd = str(Path(db.session_workdir(row, sess_proj)).resolve())
+        if other_wd == norm_workdir:
+            other_active.append({'session_id': row['session_id'], 'title': row.get('title') or row['session_id']})
+    return {'later_jobs_count': len(later), 'other_active_sessions': other_active}
+
+
+def revert_to_checkpoint(workdir: str, session_id: str, job_id: str, force: bool = False) -> Dict[str, Any]:
     """Restore workspace files to the pre-turn checkpoint and trim reverted turn state in SQLite."""
     job = db.one('SELECT * FROM jobs WHERE id=? AND session_id=?', (job_id, session_id))
     if not job:
@@ -131,6 +177,23 @@ def revert_to_checkpoint(workdir: str, session_id: str, job_id: str) -> Dict[str
     verify = _git(['rev-parse', '--verify', checkpoint_ref], workdir, check=False)
     if verify.returncode != 0:
         raise RuntimeError('检查点 Git 引用已不存在，无法回滚')
+
+    if not force:
+        conflicts = _check_revert_conflicts(workdir, session_id, job)
+        if conflicts['later_jobs_count'] > 0 or conflicts['other_active_sessions']:
+            reasons = []
+            if conflicts['later_jobs_count'] > 0:
+                reasons.append(f"该回合之后还有 {conflicts['later_jobs_count']} 轮未回滚修改")
+            if conflicts['other_active_sessions']:
+                titles = '、'.join(s['title'] for s in conflicts['other_active_sessions'][:3])
+                reasons.append(f"其他会话（{titles}）正在同一工作区执行任务")
+            return {
+                'ok': False,
+                'requires_confirm': True,
+                'later_jobs_count': conflicts['later_jobs_count'],
+                'other_active_sessions': conflicts['other_active_sessions'],
+                'message': '检测到回滚冲突：' + '；'.join(reasons) + '。确认后将覆盖后续改动。',
+            }
 
     # Restore working tree from checkpoint_ref via temporary index, keeping HEAD untouched.
     tmp_fd, tmp_index = tempfile.mkstemp(prefix='rove-rev-')

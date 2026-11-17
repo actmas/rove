@@ -1029,6 +1029,8 @@ export default function Conversation({
   model, onModelChange, effort, onEffortChange, mode, onModeChange, fast, onFastChange,
   onOpenSettings, onInspectFile, composerInputRef,
   quotedRef, onClearQuote, onQuoteText, lastPrompt, onRevertJob,
+  queue, queuePaused, supportsLiveSteer, onEnqueue, onUpdateQueue, onDeleteQueue, onToggleQueuePause,
+  sendStatus, onRetryOutbox,
 }) {
   const [approvals, setApprovals] = useState([]);
   const [atBottom, setAtBottom] = useState(true);
@@ -1341,6 +1343,15 @@ export default function Conversation({
       quotedRef={quotedRef}
       onClearQuote={onClearQuote}
       lastPrompt={lastPrompt}
+      queue={queue}
+      queuePaused={queuePaused}
+      supportsLiveSteer={supportsLiveSteer}
+      onEnqueue={onEnqueue}
+      onUpdateQueue={onUpdateQueue}
+      onDeleteQueue={onDeleteQueue}
+      onToggleQueuePause={onToggleQueuePause}
+      sendStatus={sendStatus}
+      onRetryOutbox={onRetryOutbox}
     />
   );
 

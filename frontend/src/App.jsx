@@ -12,6 +12,8 @@ import {
   api, post, patch, del, base, requestId, statusText, activeStates,
   downloadMarkdown, effortBadge, modeBadge, STATE_CACHE_KEY, clearCachedState, probeCloudflareAccessRedirect,
   purgeCacheAndReload, revertJobCheckpoint, promoteScratchSession,
+  getSessionQueue, enqueueSessionMessage, updateQueuedMessage, cancelQueuedMessage,
+  pauseSessionQueue, getHandoffPreview, getWorkstationDiagnostics,
 } from './api';
 import {usePwaManager, clearAppBadgeSafe} from './pwa';
 import {deleteHistory} from './historyCache';
@@ -178,6 +180,14 @@ export default function App() {
   const [copiedNative, setCopiedNative] = useState(false);
   const [quotedRef, setQuotedRef] = useState(null);
   const [lastPrompt, setLastPrompt] = useState('');
+  const [sessionQueue, setSessionQueue] = useState([]);
+  const [queuePaused, setQueuePaused] = useState(false);
+  const [supportsLiveSteer, setSupportsLiveSteer] = useState(false);
+  const [sendStatus, setSendStatus] = useState(null);
+  const [failedOutbox, setFailedOutbox] = useState(null);
+  const [handoffPreview, setHandoffPreview] = useState(null);
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [diagnosticsData, setDiagnosticsData] = useState(null);
   const [quotaOpen, setQuotaOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [worktreeOpen, setWorktreeOpen] = useState(false);
@@ -690,6 +700,11 @@ export default function App() {
     const nextEffort = def?.defaultEffort || 'medium';
     if (selected) {
       persistSessionPrefs({ engine: value, model: nextModel, effort: nextEffort });
+      if (events.length > 0) {
+        getHandoffPreview(selected, value, nextModel)
+          .then(res => { if (res?.needed) setHandoffPreview(res); })
+          .catch(() => {});
+      }
     } else {
       newTask();
     }
@@ -753,6 +768,7 @@ export default function App() {
   async function send(text, attachedImages = [], overrides = {}) {
     setSending(true);
     setError('');
+    setSendStatus({state: 'sending'});
     const targetEngine = overrides.engine || engine;
     const targetModel = overrides.model || model;
     const targetEffort = overrides.effort || effort;
@@ -776,14 +792,86 @@ export default function App() {
       });
       pendingRequest.current = null;
       if (text && text.trim()) setLastPrompt(text);
+      setFailedOutbox(null);
+      setSendStatus({state: 'acked'});
+      setTimeout(() => setSendStatus(prev => (prev?.state === 'acked' ? null : prev)), 2400);
       try { sessionStorage.removeItem('rove-pending-request'); } catch {}
       await refresh();
       return true;
     } catch (e) {
       setError(e.message);
+      setFailedOutbox({text, attachedImages, overrides});
+      setSendStatus({state: 'failed', error: e.message});
       return false;
     } finally {
       setSending(false);
+    }
+  }
+
+  const loadQueue = useCallback(async () => {
+    if (!selected) {
+      setSessionQueue([]);
+      setQueuePaused(false);
+      return;
+    }
+    try {
+      const res = await getSessionQueue(selected);
+      setSessionQueue(res.queue || []);
+      setQueuePaused(Boolean(res.paused));
+      setSupportsLiveSteer(Boolean(res.supports_live_steer));
+    } catch {}
+  }, [selected]);
+
+  useEffect(() => {
+    loadQueue();
+  }, [loadQueue, job?.id, job?.status]);
+
+  async function handleEnqueue(text, steer = false) {
+    if (!selected || !text) return;
+    try {
+      await enqueueSessionMessage(selected, {text, steer, model, effort, mode, fast});
+      await loadQueue();
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
+  async function handleUpdateQueue(queueId, text) {
+    try {
+      await updateQueuedMessage(queueId, {text});
+      await loadQueue();
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
+  async function handleDeleteQueue(queueId) {
+    try {
+      await cancelQueuedMessage(queueId);
+      await loadQueue();
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
+  async function handleToggleQueuePause() {
+    if (!selected) return;
+    try {
+      await pauseSessionQueue(selected, !queuePaused);
+      await loadQueue();
+      await refresh();
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
+  async function openDiagnostics() {
+    setDiagnosticsOpen(true);
+    try {
+      const data = await getWorkstationDiagnostics();
+      setDiagnosticsData(data);
+    } catch (e) {
+      setError(e.message);
     }
   }
 
@@ -813,7 +901,13 @@ export default function App() {
   async function handleRevertJob(jobId) {
     if (!selected || !jobId) return;
     try {
-      await revertJobCheckpoint(selected, jobId);
+      let res = await revertJobCheckpoint(selected, jobId, false);
+      if (res?.requires_confirm) {
+        if (!window.confirm(res.message || '检测到后续改动或并发会话占用，确认强制回滚吗？')) {
+          return;
+        }
+        res = await revertJobCheckpoint(selected, jobId, true);
+      }
       const snap = await api(`sessions/${selected}/snapshot`);
       setHistoryPage(snap);
       setEvents(snap.events || []);
@@ -1500,6 +1594,18 @@ export default function App() {
                   </div>
                 </button>
 
+                <button
+                  type="button"
+                  className="popover-item"
+                  onClick={openDiagnostics}
+                >
+                  <Wifi size={15} style={{color: 'var(--emerald)'}}/>
+                  <div className="popover-item-text">
+                    <span className="popover-item-title">待处理中心与连接诊断</span>
+                    <span className="popover-item-sub">集中处理审批、提问、失败任务与引擎状态</span>
+                  </div>
+                </button>
+
                 {activeProject && (
                   <button
                     type="button"
@@ -1675,6 +1781,15 @@ export default function App() {
                 lastPrompt={lastPrompt}
                 onCreateScratch={createScratchSession}
                 onRevertJob={handleRevertJob}
+                queue={sessionQueue}
+                queuePaused={queuePaused}
+                supportsLiveSteer={supportsLiveSteer}
+                onEnqueue={handleEnqueue}
+                onUpdateQueue={handleUpdateQueue}
+                onDeleteQueue={handleDeleteQueue}
+                onToggleQueuePause={handleToggleQueuePause}
+                sendStatus={sendStatus}
+                onRetryOutbox={failedOutbox ? () => send(failedOutbox.text, failedOutbox.attachedImages, failedOutbox.overrides) : null}
               />
             ) : (
               <>
@@ -1689,6 +1804,11 @@ export default function App() {
                     initialFile={inspectTarget}
                     onConsumeInitialFile={() => setInspectTarget('')}
                     onMentionFile={handleMentionFile}
+                    onAskDiffLine={info => {
+                      setQuotedRef(`${info.path}:${info.line}\n${info.code}`);
+                      setTab('chat');
+                      requestAnimationFrame(() => composerInputRef.current?.focus());
+                    }}
                   />
                 )}
               </>
@@ -1723,6 +1843,93 @@ export default function App() {
             enableWakeLock={enableWakeLock}
             onToggleWakeLock={() => setEnableWakeLock(v => !v)}
           />
+        )}
+
+        {handoffPreview && (
+          <div className="modal-backdrop" onClick={() => setHandoffPreview(null)}>
+            <div className="modal-card handoff-modal" onClick={e => e.stopPropagation()}>
+              <div className="modal-header">
+                <h3>跨引擎接力上下文检查</h3>
+                <button type="button" className="icon-button" onClick={() => setHandoffPreview(null)}><X size={16}/></button>
+              </div>
+              <div className="modal-body handoff-body">
+                <p className="handoff-meta">
+                  目标引擎：<strong>{handoffPreview.target_engine}</strong>
+                  {handoffPreview.target_model ? ` · 模型：${handoffPreview.target_model}` : ''}
+                  {' · '}纳入轮次：<strong>{handoffPreview.included_turns}/{handoffPreview.total_turns}</strong>
+                  {' · '}约 <strong>{handoffPreview.estimated_tokens}</strong> tokens
+                </p>
+                {handoffPreview.omitted_count > 0 && (
+                  <details className="handoff-omitted">
+                    <summary>已省略 {handoffPreview.omitted_count} 条早期对话（点击查回原文）</summary>
+                    <div className="handoff-omitted-list">
+                      {(handoffPreview.omitted_turns || []).map((t, i) => (
+                        <div key={i} className="handoff-omitted-item">
+                          <div><strong>提问：</strong>{t.prompt}</div>
+                          {t.reply_preview && <div className="muted"><strong>回复：</strong>{t.reply_preview}</div>}
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
+                <pre className="handoff-preview-pre">{handoffPreview.preview_text}</pre>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {diagnosticsOpen && (
+          <div className="modal-backdrop" onClick={() => setDiagnosticsOpen(false)}>
+            <div className="modal-card handoff-modal" onClick={e => e.stopPropagation()}>
+              <div className="modal-header">
+                <h3>待处理任务中心与连接诊断</h3>
+                <button type="button" className="icon-button" onClick={() => setDiagnosticsOpen(false)}><X size={16}/></button>
+              </div>
+              <div className="modal-body handoff-body">
+                {!diagnosticsData ? (
+                  <p className="empty-note">正在采集工作站状态…</p>
+                ) : (
+                  <>
+                    <div className="diag-section">
+                      <h4>引擎与登录连接</h4>
+                      <div className="diag-chips">
+                        <span className="diag-chip ok">鉴权会话正常</span>
+                        {(diagnosticsData.engines || []).map(eng => (
+                          <span key={eng.id} className={`diag-chip ${eng.installed ? 'ok' : 'warn'}`}>
+                            {eng.id}: {eng.installed ? '已就绪' : '未检测到 CLI'}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="diag-section">
+                      <h4>待审批 ({(diagnosticsData.pending_approvals || []).length}) / 待回答 ({(diagnosticsData.pending_questions || []).length})</h4>
+                      {(diagnosticsData.pending_approvals || []).map(a => (
+                        <button key={a.id} type="button" className="diag-row" onClick={() => { setSelected(a.session_id); setDiagnosticsOpen(false); }}>
+                          <span>[审批] {a.session_title}: {a.title}</span>
+                        </button>
+                      ))}
+                      {(diagnosticsData.pending_questions || []).map(q => (
+                        <button key={q.id} type="button" className="diag-row" onClick={() => { setSelected(q.session_id); setDiagnosticsOpen(false); }}>
+                          <span>[提问] {q.session_title}: {q.prompt}</span>
+                        </button>
+                      ))}
+                      {!(diagnosticsData.pending_approvals?.length || diagnosticsData.pending_questions?.length) && (
+                        <p className="muted">暂无挂起的审批或提问。</p>
+                      )}
+                    </div>
+                    <div className="diag-section">
+                      <h4>近期失败任务 ({(diagnosticsData.failed_jobs || []).length})</h4>
+                      {(diagnosticsData.failed_jobs || []).slice(0, 6).map(j => (
+                        <button key={j.id} type="button" className="diag-row" onClick={() => { setSelected(j.session_id); setDiagnosticsOpen(false); }}>
+                          <span>[{j.engine || 'agent'}] {j.session_title}: {(j.error || '执行失败').slice(0, 80)}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
         )}
 
         {quotaOpen && (

@@ -51,6 +51,7 @@ from . import account_pool
 from . import fork
 from . import model_router
 from . import webhooks
+from . import context_bridge
 
 COOKIE = 'walking_session'
 MODEL_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$')
@@ -780,19 +781,29 @@ async def job_turn_diff(ident: str, job_id: str):
     if not job:
         raise HTTPException(404, '任务记录不存在')
     workdir = db.session_workdir(s, p)
-    return await asyncio.to_thread(checkpoints.diff_checkpoint, workdir, job.get('checkpoint_ref') or '')
+    return await asyncio.to_thread(
+        checkpoints.diff_checkpoint,
+        workdir,
+        job.get('checkpoint_ref') or '',
+        job.get('checkpoint_after_ref') or '',
+    )
+
+
+class RevertBody(BaseModel):
+    force: bool = False
 
 
 @app.post('/api/sessions/{ident}/jobs/{job_id}/revert')
-async def revert_job_checkpoint(ident: str, job_id: str):
+async def revert_job_checkpoint(ident: str, job_id: str, body: RevertBody | None = None):
     s = session(ident)
     p = project(s['project_id'])
     active = db.one("SELECT 1 FROM jobs WHERE session_id=? AND status IN ('queued','running','waiting') LIMIT 1", (ident,))
     if active:
         raise HTTPException(409, '当前会话有任务正在运行，请先停止后再回滚检查点')
     workdir = db.session_workdir(s, p)
+    force = bool(body.force) if body else False
     try:
-        return await asyncio.to_thread(checkpoints.revert_to_checkpoint, workdir, ident, job_id)
+        return await asyncio.to_thread(checkpoints.revert_to_checkpoint, workdir, ident, job_id, force=force)
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
     except RuntimeError as exc:
@@ -1838,14 +1849,124 @@ class QueueMergeBody(BaseModel):
     ids: list[str] = Field(min_length=2, max_length=20)
 
 
+class QueuePauseBody(BaseModel):
+    paused: bool
+
+
 @app.get('/api/sessions/{ident}/queue')
 async def list_session_queue(ident: str):
-    session(ident)
+    s = session(ident)
     rows = db.query(
         "SELECT * FROM session_queue WHERE session_id=? AND status='pending' ORDER BY steer DESC, created ASC",
         (ident,),
     )
-    return {'session_id': ident, 'queue': rows}
+    return {
+        'session_id': ident,
+        'paused': bool(s.get('queue_paused')),
+        'supports_live_steer': False,
+        'queue': rows,
+    }
+
+
+@app.post('/api/sessions/{ident}/queue/pause')
+async def pause_or_resume_session_queue(ident: str, body: QueuePauseBody):
+    s = session(ident)
+    paused_int = 1 if body.paused else 0
+    db.execute('UPDATE sessions SET queue_paused=?, updated=? WHERE id=?', (paused_int, time.time(), ident))
+    dispatched_job_id = None
+    if not body.paused:
+        active = db.one(
+            "SELECT 1 FROM jobs WHERE session_id=? AND status IN ('queued','running','waiting_approval','waiting_question') LIMIT 1",
+            (ident,),
+        )
+        if not active:
+            nxt = db.one(
+                "SELECT * FROM session_queue WHERE session_id=? AND status='pending' ORDER BY steer DESC, created ASC LIMIT 1",
+                (ident,),
+            )
+            if nxt:
+                next_job_id = secrets.token_hex(12)
+                now_ts = time.time()
+                eff_model = nxt.get('model') or s.get('model')
+                eff_effort = nxt.get('effort') or s.get('effort')
+                eff_mode = nxt.get('mode') or s.get('mode') or 'standard'
+                eff_fast = int(bool(nxt['fast'] if nxt.get('fast') is not None else s.get('fast')))
+                with db.transaction() as conn:
+                    claimed = conn.execute(
+                        "UPDATE session_queue SET status='dispatched', updated=? WHERE id=? AND status='pending'",
+                        (now_ts, nxt['id']),
+                    )
+                    if claimed.rowcount:
+                        conn.execute(
+                            'INSERT INTO jobs(id,session_id,request_id,prompt,status,started,model,effort,mode,fast,images) '
+                            'VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                            (
+                                next_job_id, ident, f"q-{nxt['id']}", nxt['prompt'], 'queued', now_ts,
+                                eff_model, eff_effort, eff_mode, eff_fast, nxt.get('images') or '[]',
+                            ),
+                        )
+                        conn.execute(
+                            'INSERT INTO events(session_id,job_id,kind,payload,created) VALUES(?,?,?,?,?)',
+                            (ident, next_job_id, 'user', json.dumps({'text': nxt['prompt'], 'queued': True}, ensure_ascii=False), now_ts),
+                        )
+                        dispatched_job_id = next_job_id
+                if dispatched_job_id:
+                    ensure_worker(dispatched_job_id)
+    return {'ok': True, 'session_id': ident, 'paused': body.paused, 'dispatched_job_id': dispatched_job_id}
+
+
+@app.get('/api/sessions/{ident}/handoff-preview')
+async def session_handoff_preview(ident: str, target_engine: str, target_model: str | None = None):
+    s = session(ident)
+    p = project(s['project_id'])
+    return await asyncio.to_thread(
+        context_bridge.inspect_handoff_context, s, p, target_engine, target_model
+    )
+
+
+@app.get('/api/diagnostics')
+async def workstation_diagnostics():
+    pending_rows = db.query(
+        "SELECT a.id, j.session_id, a.job_id, a.method, a.payload, a.created, s.title AS session_title "
+        "FROM approvals a JOIN jobs j ON j.id=a.job_id JOIN sessions s ON s.id=j.session_id "
+        "WHERE a.decision IS NULL ORDER BY a.created DESC LIMIT 50"
+    )
+    approvals = []
+    questions = []
+    for r in pending_rows:
+        try:
+            payload = json.loads(r.get('payload') or '{}')
+        except Exception:
+            payload = {}
+        item = {
+            'id': r['id'],
+            'session_id': r['session_id'],
+            'job_id': r['job_id'],
+            'session_title': r.get('session_title') or r['session_id'],
+            'method': r['method'],
+            'title': payload.get('title') or payload.get('command') or r['method'],
+            'prompt': payload.get('prompt') or payload.get('question') or payload.get('command') or '',
+        }
+        if 'question' in (r.get('method') or '').lower():
+            questions.append(item)
+        else:
+            approvals.append(item)
+    failed_jobs = db.query(
+        "SELECT j.id, j.session_id, j.error, j.ended, j.engine, s.title AS session_title "
+        "FROM jobs j JOIN sessions s ON s.id=j.session_id WHERE j.status='failed' ORDER BY COALESCE(j.ended, 0) DESC LIMIT 15"
+    )
+    engine_checks = []
+    for eng_id, bin_name in (('codex', 'codex'), ('antigravity', 'agy'), ('claude', 'claude'), ('gemini', 'gemini')):
+        path = shutil.which(bin_name)
+        engine_checks.append({'id': eng_id, 'binary': bin_name, 'installed': bool(path)})
+    return {
+        'ok': True,
+        'auth_ok': True,
+        'pending_approvals': approvals,
+        'pending_questions': questions,
+        'failed_jobs': failed_jobs,
+        'engines': engine_checks,
+    }
 
 
 @app.post('/api/sessions/{ident}/queue', status_code=201)

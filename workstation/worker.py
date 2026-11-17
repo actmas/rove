@@ -525,7 +525,15 @@ async def run(ident):
             )
     except Exception as exc:
         outcome = {'status': 'failed', 'error': str(exc)[:4000]}
-    db.execute('UPDATE jobs SET status=?,error=?,ended=? WHERE id=?', (outcome['status'], outcome['error'], time.time(), ident))
+    after_ckpt = ''
+    if job.get('execution_target') != 'cloud':
+        with contextlib.suppress(Exception):
+            workdir = db.session_workdir(session, project)
+            after_ckpt = checkpoints.capture_checkpoint(workdir, session['id'], ident, phase='after')
+    db.execute(
+        'UPDATE jobs SET status=?,error=?,ended=?,checkpoint_after_ref=? WHERE id=?',
+        (outcome['status'], outcome['error'], time.time(), after_ckpt, ident),
+    )
     db.execute('UPDATE sessions SET updated=?, last_engine=? WHERE id=?', (time.time(), active_engine, session['id']))
     db.event(session['id'], ident, 'job_status', outcome)
     if outcome['status'] == 'completed' and job.get('execution_target') != 'cloud':
@@ -621,7 +629,7 @@ async def run(ident):
                 args.append(session['id'])
                 db.execute(f"UPDATE sessions SET {','.join(sets)} WHERE id=?", tuple(args))
                 fresh_sess = db.one('SELECT * FROM sessions WHERE id=?', (session['id'],))
-        if outcome['status'] in ('completed', 'stopped'):
+        if outcome['status'] in ('completed', 'stopped') and not bool((fresh_sess or session).get('queue_paused')):
             nxt = db.one(
                 "SELECT * FROM session_queue WHERE session_id=? AND status='pending' "
                 "ORDER BY steer DESC, created ASC LIMIT 1",

@@ -7934,3 +7934,221 @@ pre {
   border-color: rgba(59, 130, 246, 0.35);
   background: rgba(59, 130, 246, 0.08);
 }
+
+.queue-panel {
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.queue-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.queue-panel-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+
+.queue-action-btn,
+.queue-send-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 9px;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.queue-action-btn:hover,
+.queue-send-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+}
+
+.queue-send-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.queue-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  font-size: 12.5px;
+}
+
+.queue-item-idx {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.queue-item-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-item-ops,
+.active-send-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.queue-icon-btn {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 3px;
+  cursor: pointer;
+}
+
+.queue-icon-btn:hover {
+  color: var(--text);
+}
+
+.queue-edit-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+
+.queue-edit-input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.send-status-pill {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 10px;
+  margin-bottom: 6px;
+  border-radius: 8px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-subtle);
+}
+
+.send-status-pill.status-acked {
+  border-color: rgba(16, 185, 129, 0.35);
+  color: var(--emerald);
+}
+
+.send-status-pill.status-failed {
+  border-color: rgba(239, 68, 68, 0.35);
+  color: var(--danger);
+}
+
+.diff-row-selected td {
+  background: rgba(59, 130, 246, 0.1) !important;
+}
+
+.diff-ask-btn {
+  margin-left: 10px;
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: 6px;
+  border: 1px solid rgba(59, 130, 246, 0.4);
+  background: var(--surface);
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.handoff-modal {
+  max-width: 640px;
+  width: min(92vw, 640px);
+}
+
+.handoff-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.handoff-preview-pre {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-subtle);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.diag-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.diag-chip {
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-subtle);
+}
+
+.diag-chip.ok {
+  border-color: rgba(16, 185, 129, 0.35);
+  color: var(--emerald);
+}
+
+.diag-chip.warn {
+  border-color: rgba(245, 158, 11, 0.35);
+  color: var(--amber);
+}
+
+.diag-row {
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12.5px;
+  cursor: pointer;
+  margin-bottom: 6px;
+}
+
+.diag-row:hover {
+  background: var(--surface-hover);
+}

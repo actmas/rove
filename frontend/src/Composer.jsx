@@ -2,7 +2,7 @@ import {useCallback, useEffect, useRef, useState} from 'react';
 import {
   ArrowUp, Folder, Square, ChevronDown, Brain, SlidersHorizontal,
   ShieldCheck, Zap, ImagePlus, AtSign, X, FileCode, Sparkles,
-  Cloud, Laptop, ExternalLink, Info,
+  Cloud, Laptop, ExternalLink, Info, Pause, Play, Pencil, Trash2, ListOrdered,
 } from 'lucide-react';
 import {api, post, compressImageFile} from './api';
 
@@ -15,6 +15,9 @@ export default function Composer({
   engine, onEngineChange, engineState, catalog,
   model, onModelChange, effort, onEffortChange, mode, onModeChange, fast, onFastChange,
   onOpenSettings, externalRef, quotedRef, onClearQuote, lastPrompt,
+  queue = [], queuePaused = false, supportsLiveSteer = false,
+  onEnqueue, onUpdateQueue, onDeleteQueue, onToggleQueuePause,
+  sendStatus = null, onRetryOutbox,
 }) {
   const [textAttachments, setTextAttachments] = useState([]);
   const [targetChoice, setTargetChoice] = useState(() => {
@@ -52,11 +55,14 @@ export default function Composer({
   const fileInputRef = useRef(null);
   const isComposingRef = useRef(false);
   const draftStorageKey = `walking-workstation:draft:${sessionId || 'new'}`;
+  const draftAttachKey = `walking-workstation:draft-att:${sessionId || 'new'}`;
+  const [editingQueueId, setEditingQueueId] = useState(null);
+  const [editingQueueText, setEditingQueueText] = useState('');
 
   // Isolate draft text and image state locally if not controlled by parent
   const [internalPrompt, setInternalPrompt] = useState(() => {
     try {
-      const saved = sessionStorage.getItem(draftStorageKey);
+      const saved = localStorage.getItem(draftStorageKey) || sessionStorage.getItem(draftStorageKey);
       if (saved) return saved;
     } catch {}
     return initialPrompt;
@@ -72,13 +78,33 @@ export default function Composer({
   useEffect(() => {
     if (propPrompt !== undefined) return;
     try {
+      const saved = localStorage.getItem(draftStorageKey) || '';
+      setInternalPrompt(saved || initialPrompt);
+      const savedAtt = localStorage.getItem(draftAttachKey);
+      setTextAttachments(savedAtt ? JSON.parse(savedAtt) : []);
+    } catch {}
+  }, [draftStorageKey, draftAttachKey]);
+
+  useEffect(() => {
+    if (propPrompt !== undefined) return;
+    try {
       if (internalPrompt) {
-        sessionStorage.setItem(draftStorageKey, internalPrompt);
+        localStorage.setItem(draftStorageKey, internalPrompt);
       } else {
-        sessionStorage.removeItem(draftStorageKey);
+        localStorage.removeItem(draftStorageKey);
       }
     } catch {}
   }, [internalPrompt, draftStorageKey, propPrompt]);
+
+  useEffect(() => {
+    try {
+      if (textAttachments.length > 0) {
+        localStorage.setItem(draftAttachKey, JSON.stringify(textAttachments));
+      } else {
+        localStorage.removeItem(draftAttachKey);
+      }
+    } catch {}
+  }, [textAttachments, draftAttachKey]);
 
   const [mention, setMention] = useState(null);
   const [fileResults, setFileResults] = useState([]);
@@ -430,8 +456,92 @@ export default function Composer({
         </div>
       )}
 
+      {(queue.length > 0 || queuePaused) && (
+        <div className="queue-panel">
+          <div className="queue-panel-head">
+            <span className="queue-panel-title">
+              <ListOrdered size={13}/>
+              <span>待执行队列 ({queue.length}){queuePaused ? ' · 已暂停' : ''}</span>
+            </span>
+            {onToggleQueuePause && (
+              <button type="button" className="queue-action-btn" onClick={onToggleQueuePause}>
+                {queuePaused ? <><Play size={11}/> 恢复队列</> : <><Pause size={11}/> 暂停队列</>}
+              </button>
+            )}
+          </div>
+          {queue.map((item, idx) => (
+            <div key={item.id} className="queue-item">
+              {editingQueueId === item.id ? (
+                <div className="queue-edit-row">
+                  <input
+                    className="queue-edit-input"
+                    value={editingQueueText}
+                    onChange={e => setEditingQueueText(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter' && editingQueueText.trim()) {
+                        onUpdateQueue?.(item.id, editingQueueText.trim());
+                        setEditingQueueId(null);
+                      } else if (e.key === 'Escape') {
+                        setEditingQueueId(null);
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="queue-action-btn"
+                    onClick={() => {
+                      if (editingQueueText.trim()) onUpdateQueue?.(item.id, editingQueueText.trim());
+                      setEditingQueueId(null);
+                    }}
+                  >保存</button>
+                  <button type="button" className="queue-action-btn" onClick={() => setEditingQueueId(null)}>取消</button>
+                </div>
+              ) : (
+                <>
+                  <span className="queue-item-idx">#{idx + 1}{item.steer ? ' 优先' : ''}</span>
+                  <span className="queue-item-text" title={item.prompt}>{item.prompt}</span>
+                  <div className="queue-item-ops">
+                    {onUpdateQueue && (
+                      <button
+                        type="button"
+                        className="queue-icon-btn"
+                        aria-label="编辑排队消息"
+                        onClick={() => {
+                          setEditingQueueId(item.id);
+                          setEditingQueueText(item.prompt);
+                        }}
+                      ><Pencil size={12}/></button>
+                    )}
+                    {onDeleteQueue && (
+                      <button
+                        type="button"
+                        className="queue-icon-btn"
+                        aria-label="删除排队消息"
+                        onClick={() => onDeleteQueue(item.id)}
+                      ><Trash2 size={12}/></button>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
       <form className={`composer ${mode === 'plan' ? 'mode-plan' : mode === 'auto' ? 'mode-auto' : ''}`} onSubmit={handleSubmit}>
         {error && <div className="error composer-error" role="alert">{error}</div>}
+        {sendStatus && (
+          <div className={`send-status-pill status-${sendStatus.state}`}>
+            <span>
+              {sendStatus.state === 'sending' && '正在发送至工作站…'}
+              {sendStatus.state === 'acked' && '服务器已接收'}
+              {sendStatus.state === 'failed' && `发送失败：${sendStatus.error || '网络异常'}`}
+            </span>
+            {sendStatus.state === 'failed' && onRetryOutbox && (
+              <button type="button" className="queue-action-btn" onClick={onRetryOutbox}>点击重试</button>
+            )}
+          </div>
+        )}
 
         {(quotedRef || textAttachments.length > 0 || images.length > 0) && (
           <div className="composer-attachments">
@@ -708,15 +818,45 @@ export default function Composer({
             </button>
 
             {active ? (
-              <button
-                type="button"
-                className="send-button stop-button"
-                aria-label="停止任务"
-                title="停止当前任务"
-                onClick={onStop}
-              >
-                <Square size={13} fill="currentColor"/>
-              </button>
+              <div className="active-send-controls">
+                {onEnqueue && prompt.trim() && (
+                  <>
+                    <button
+                      type="button"
+                      className="queue-send-btn"
+                      title="加入排队，当前轮次完成后自动执行"
+                      onClick={() => {
+                        onEnqueue(prompt.trim(), false);
+                        setPrompt('');
+                      }}
+                    >
+                      下一轮执行
+                    </button>
+                    <button
+                      type="button"
+                      className="queue-send-btn steer-btn"
+                      disabled={!supportsLiveSteer}
+                      title={supportsLiveSteer ? '立即插话注入当前任务' : '当前引擎不支持运行中实时注入（仅支持「下一轮执行」排队）'}
+                      onClick={() => {
+                        if (!supportsLiveSteer) return;
+                        onEnqueue(prompt.trim(), true);
+                        setPrompt('');
+                      }}
+                    >
+                      立即插话
+                    </button>
+                  </>
+                )}
+                <button
+                  type="button"
+                  className="send-button stop-button"
+                  aria-label="停止任务"
+                  title="停止当前任务"
+                  onClick={onStop}
+                >
+                  <Square size={13} fill="currentColor"/>
+                </button>
+              </div>
             ) : (
               <button
                 type="submit"

@@ -469,3 +469,57 @@ def build_rollover_context(
         BRIDGE_END_TAG,
     ])
     return '\n'.join(lines)
+
+
+def inspect_handoff_context(
+    session: Dict[str, Any],
+    project: Dict[str, Any],
+    target_engine: str,
+    target_model: Optional[str] = None,
+    max_history_turns: int = 4,
+) -> Dict[str, Any]:
+    """Return a structured preview of cross-engine handoff context and any omitted historical turns."""
+    session_id = session.get('id')
+    if not session_id:
+        return {'needed': False, 'total_turns': 0, 'included_turns': 0, 'omitted_turns': [], 'preview_text': ''}
+
+    raw_turns = extract_session_turns(session_id)
+    turns = _substantive_turns(raw_turns)
+    total = len(turns)
+    included = turns[-max_history_turns:] if total > max_history_turns else turns
+    omitted = turns[:-max_history_turns] if total > max_history_turns else []
+
+    preview_text = build_handoff_context(session, project, target_engine, max_history_turns=max_history_turns)
+    if not preview_text and turns:
+        preview_text = build_rollover_context(session, project, max_history_turns=max_history_turns)
+
+    proj_path = (project or {}).get('path') or ''
+    changed_files: set[str] = set()
+    for t in turns:
+        for f in (t.get('files') or []):
+            changed_files.add(_normalize_rel_path(f, proj_path))
+
+    omitted_items = [
+        {
+            'job_id': t.get('job_id') or '',
+            'engine': t.get('engine') or '',
+            'prompt': (t.get('prompt') or '')[:300],
+            'reply_preview': (t.get('reply') or '')[:300],
+        }
+        for t in omitted
+    ]
+    chars = len(preview_text)
+    return {
+        'needed': bool(preview_text),
+        'from_engine': session.get('last_engine') or session.get('engine') or '',
+        'target_engine': target_engine,
+        'target_model': target_model or '',
+        'total_turns': total,
+        'included_turns': len(included),
+        'omitted_count': len(omitted_items),
+        'omitted_turns': omitted_items,
+        'changed_files': sorted(changed_files)[:20],
+        'context_chars': chars,
+        'estimated_tokens': max(1, chars // 4) if chars else 0,
+        'preview_text': preview_text,
+    }

@@ -92,6 +92,15 @@ Runtime data defaults to `~/.config/walking-workstation/`. Set `WORKSTATION_DATA
 
 Start Rove locally and configure an access password, then choose a connection method.
 
+| Method | Best for | Browser URL |
+| --- | --- | --- |
+| LAN | Same Wi-Fi / local network | `http://<LAN-IP>:8765` |
+| Tailscale Serve | Private mesh VPN with automatic HTTPS | Serve HTTPS URL |
+| Cloudflare Tunnel + Access | Custom domain over the public internet with Zero Trust | `https://rove.example.com` |
+| frp / Caddy / Nginx | Custom VPS reverse proxy with WebSocket + TLS | `https://rove.example.com` |
+
+> **Install as Mobile PWA**: Open the HTTPS URL in iOS Safari (*Share → Add to Home Screen*) or Android Chrome (*Install App*) for a full-screen mobile vibe coding experience with Web Push notifications.
+
 ### Local network
 
 Bind to the LAN interface and allow trusted devices through the host firewall.
