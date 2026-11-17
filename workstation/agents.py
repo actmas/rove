@@ -256,6 +256,28 @@ AGENT_PRESETS: List[Dict[str, Any]] = [
             },
         ],
     },
+    {
+        'id': 'acp-agent',
+        'name': '通用 ACP Agent',
+        'short_name': 'ACP',
+        'description': '标准 Agent Client Protocol (ACP) JSON-RPC 2.0 驱动，即插即用接入任意兼容 ACP 的本地编程代理',
+        'adapter': 'acp',
+        'binary': '',
+        'args_template': ['--acp'],
+        'tone': 'emerald',
+        'models': [
+            {
+                'id': 'default',
+                'name': 'ACP 默认模型',
+                'description': '使用 ACP Agent 自身默认模型配置',
+                'isDefault': True,
+                'defaultEffort': 'medium',
+                'efforts': _DEFAULT_EFFORTS,
+                'supportsFast': False,
+                'supportsImage': False,
+            },
+        ],
+    },
 ]
 
 
@@ -433,8 +455,8 @@ def upsert_custom_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
     name = str(payload.get('name') or existing.get('name') or preset.get('name') or agent_id).strip()
     short_name = str(payload.get('short_name') or existing.get('short_name') or preset.get('short_name') or name[:10]).strip()
     adapter = str(payload.get('adapter') or existing.get('adapter') or preset.get('adapter') or 'cli').strip()
-    if adapter not in ('cli', 'openai_http'):
-        raise ValueError('adapter 仅支持 cli 或 openai_http')
+    if adapter not in ('cli', 'openai_http', 'acp'):
+        raise ValueError('adapter 仅支持 cli、openai_http 或 acp')
 
     raw_models = payload.get('models') if 'models' in payload else (existing.get('models') or preset.get('models'))
     models = _normalize_models(raw_models, name)
@@ -452,7 +474,7 @@ def upsert_custom_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
         'updated': time.time(),
     }
 
-    if adapter == 'cli':
+    if adapter in ('cli', 'acp'):
         binary = str(payload.get('binary') if 'binary' in payload else (existing.get('binary') or preset.get('binary') or agent_id)).strip()
         if not binary:
             raise ValueError('CLI Agent 必须指定可执行文件路径或命令名')
@@ -509,7 +531,7 @@ def sanitize_agent_for_client(spec: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(spec)
     out['execution_targets'] = ['local', 'cloud'] if spec.get('cloud_url') else ['local']
     agent_id = out['id']
-    if out.get('adapter') == 'cli':
+    if out.get('adapter') in ('cli', 'acp'):
         resolved = resolve_binary(out.get('binary', ''))
         out['resolved_binary'] = resolved
         out['installed'] = bool(resolved)
@@ -575,7 +597,7 @@ async def check_custom_agent(agent_id: str) -> Dict[str, Any]:
         raise ValueError(f'Agent {agent_id} 不存在')
     adapter = spec.get('adapter', 'cli')
     outcome: Dict[str, Any]
-    if adapter == 'cli':
+    if adapter in ('cli', 'acp'):
         resolved = resolve_binary(spec.get('binary', ''))
         if not resolved:
             outcome = {
@@ -1120,6 +1142,166 @@ async def _run_openai_http_agent(
         return {'status': 'failed', 'error': f'调用 {spec.get("name", agent_id)} 失败：{str(exc)[:1500]}'}
 
 
+async def _run_acp_agent(
+    spec: Dict[str, Any],
+    job: Dict[str, Any],
+    session: Dict[str, Any],
+    project: Dict[str, Any],
+    images: List[Path],
+) -> Dict[str, Any]:
+    """Execute a turn over Agent Client Protocol (ACP) JSON-RPC 2.0 stdio."""
+    agent_id = spec['id']
+    binary = resolve_binary(spec.get('binary', ''))
+    if not binary:
+        return {'status': 'failed', 'error': f"未找到 {spec.get('name', agent_id)} 可执行文件：{spec.get('binary')}"}
+
+    workdir = db.session_workdir(session, project)
+    extra_args = [str(a) for a in (spec.get('args_template') or []) if '{prompt}' not in str(a)]
+    full_prompt = _build_agent_prompt(agent_id, job, session, project, images)
+    mode = job.get('mode') or session.get('mode') or 'standard'
+
+    proc = await asyncio.create_subprocess_exec(
+        binary, *extra_args,
+        cwd=workdir,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        limit=16 * 1024 * 1024,
+    )
+
+    next_id = 0
+    pending: Dict[int, asyncio.Future] = {}
+    think_parts: List[str] = []
+    text_parts: List[str] = []
+    think_id = f'acp-think-{job["id"]}'
+    text_id = f'acp-msg-{job["id"]}'
+    acp_session_id = get_session_native_agent_id(session, agent_id) or ''
+
+    def _send(obj: Dict[str, Any]):
+        if proc.stdin and not proc.stdin.is_closing():
+            proc.stdin.write((json.dumps(obj, ensure_ascii=False) + '\n').encode('utf-8'))
+
+    async def _rpc_call(method: str, params: Dict[str, Any], timeout: float = 30.0) -> Any:
+        nonlocal next_id
+        next_id += 1
+        rid = next_id
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        pending[rid] = fut
+        _send({'jsonrpc': '2.0', 'id': rid, 'method': method, 'params': params})
+        await proc.stdin.drain()
+        res = await asyncio.wait_for(fut, timeout=timeout)
+        return res
+
+    async def _handle_update(params: Dict[str, Any]):
+        upd = params.get('update') or params
+        kind = upd.get('sessionUpdate') or upd.get('type') or ''
+        if kind == 'agent_thought_chunk':
+            txt = (upd.get('content') or {}).get('text') or upd.get('text') or ''
+            if txt:
+                think_parts.append(txt)
+                db.event(session['id'], job['id'], 'antigravity', {
+                    'event': 'agy_step', 'step_id': think_id, 'step_kind': 'reasoning',
+                    'engine': agent_id, 'text': ''.join(think_parts), 'completed': False,
+                })
+        elif kind == 'agent_message_chunk':
+            txt = (upd.get('content') or {}).get('text') or upd.get('text') or ''
+            if txt:
+                text_parts.append(txt)
+                db.event(session['id'], job['id'], 'antigravity', {
+                    'event': 'agy_step', 'step_id': text_id, 'step_kind': 'agent',
+                    'engine': agent_id, 'text': ''.join(text_parts), 'completed': False,
+                })
+        elif kind in ('tool_call', 'tool_call_update'):
+            tid = upd.get('toolCallId') or upd.get('id') or f'tool-{job["id"]}'
+            title = upd.get('title') or upd.get('name') or 'ACP 工具调用'
+            status = upd.get('status') or ''
+            db.event(session['id'], job['id'], 'antigravity', {
+                'event': 'agy_step', 'step_id': f'acp-{tid}', 'step_kind': 'tool',
+                'tool_kind': 'mcp', 'engine': agent_id, 'title': str(title),
+                'detail': str(upd.get('rawInput') or upd.get('content') or '')[:1000],
+                'completed': status in ('completed', 'failed', 'cancelled'),
+            })
+
+    async def _reader():
+        assert proc.stdout is not None
+        async for raw_line in proc.stdout:
+            line = raw_line.decode('utf-8', errors='replace').strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if 'id' in msg and ('result' in msg or 'error' in msg) and 'method' not in msg:
+                fut = pending.pop(msg['id'], None)
+                if fut and not fut.done():
+                    if 'error' in msg:
+                        fut.set_exception(RuntimeError((msg['error'] or {}).get('message') or 'ACP RPC error'))
+                    else:
+                        fut.set_result(msg.get('result'))
+            elif msg.get('method') == 'session/update':
+                await _handle_update(msg.get('params') or {})
+            elif 'id' in msg and msg.get('method') == 'session/request_permission':
+                opts = (msg.get('params') or {}).get('options') or []
+                allow_opt = next((o.get('optionId') for o in opts if 'allow' in str(o.get('kind', '')).lower()), None)
+                if mode in ('auto', 'full') and allow_opt:
+                    _send({'jsonrpc': '2.0', 'id': msg['id'], 'result': {'outcome': {'outcome': 'selected', 'optionId': allow_opt}}})
+                else:
+                    _send({'jsonrpc': '2.0', 'id': msg['id'], 'result': {'outcome': {'outcome': 'cancelled'}}})
+
+    reader_task = asyncio.create_task(_reader())
+    try:
+        await _rpc_call('initialize', {
+            'protocolVersion': 1,
+            'clientCapabilities': {},
+            'clientInfo': {'name': 'Rove', 'version': '1.0'},
+        }, timeout=15.0)
+        if not acp_session_id:
+            sess_res = await _rpc_call('session/new', {'cwd': workdir, 'mcpServers': []}, timeout=15.0)
+            acp_session_id = (sess_res or {}).get('sessionId') or f'acp-{session["id"]}'
+            set_session_native_agent_id(session['id'], agent_id, acp_session_id)
+
+        prompt_task = asyncio.create_task(_rpc_call('session/prompt', {
+            'sessionId': acp_session_id,
+            'prompt': [{'type': 'text', 'text': full_prompt}],
+        }, timeout=600.0))
+
+        while not prompt_task.done():
+            if db.one('SELECT stop FROM jobs WHERE id=?', (job['id'],))['stop']:
+                _send({'jsonrpc': '2.0', 'method': 'session/cancel', 'params': {'sessionId': acp_session_id}})
+                prompt_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await prompt_task
+                return {'status': 'stopped', 'error': None}
+            await asyncio.wait({prompt_task}, timeout=0.35)
+
+        await prompt_task
+        if think_parts:
+            db.event(session['id'], job['id'], 'antigravity', {
+                'event': 'agy_step', 'step_id': think_id, 'step_kind': 'reasoning',
+                'engine': agent_id, 'text': ''.join(think_parts), 'completed': True,
+            })
+        if text_parts:
+            db.event(session['id'], job['id'], 'antigravity', {
+                'event': 'agy_step', 'step_id': text_id, 'step_kind': 'agent',
+                'engine': agent_id, 'text': ''.join(text_parts), 'completed': True,
+            })
+        return {'status': 'completed', 'error': None}
+    except Exception as exc:
+        return {'status': 'failed', 'error': f'ACP Agent 执行失败：{str(exc)[:1500]}'}
+    finally:
+        reader_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await reader_task
+        if proc.returncode is None:
+            proc.terminate()
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(proc.wait(), 3)
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+
+
 async def run_custom_agent(
     agent_id: str,
     job: Dict[str, Any],
@@ -1132,4 +1314,6 @@ async def run_custom_agent(
         return {'status': 'failed', 'error': f'未找到或未启用 Agent：{agent_id}'}
     if spec.get('adapter') == 'openai_http':
         return await _run_openai_http_agent(spec, job, session, project, images)
+    if spec.get('adapter') == 'acp':
+        return await _run_acp_agent(spec, job, session, project, images)
     return await _run_cli_agent(spec, job, session, project, images)

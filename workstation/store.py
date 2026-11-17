@@ -468,11 +468,17 @@ def init():
             'last_engine': 'TEXT',
             'external_stopped_at': 'REAL NOT NULL DEFAULT 0',
             'external_stopped_marker': "TEXT NOT NULL DEFAULT ''",
+            'pruned_through_seq': 'INTEGER NOT NULL DEFAULT 0',
+        })
+        _ensure_columns(db, 'projects', {
+            'is_scratch': 'INTEGER NOT NULL DEFAULT 0',
         })
         _ensure_columns(db, 'jobs', {
             'execution_target': "TEXT NOT NULL DEFAULT 'local'",
             'cloud_environment': "TEXT NOT NULL DEFAULT ''",
             'cloud_task_id': 'TEXT',
+            'checkpoint_ref': "TEXT NOT NULL DEFAULT ''",
+            'reverted': 'INTEGER NOT NULL DEFAULT 0',
             'model': 'TEXT',
             'effort': 'TEXT',
             'mode': 'TEXT',
@@ -499,7 +505,7 @@ def init():
     if any(ROOT.parent.resolve().is_relative_to(r) or r == ROOT.parent.resolve() for r in allowed_roots):
         for p in ROOT.parent.iterdir():
             if p.is_dir() and not p.name.startswith('.'):
-                execute('INSERT OR IGNORE INTO projects VALUES(?,?,?)', (secrets.token_hex(8), p.name, str(p.resolve())))
+                execute('INSERT OR IGNORE INTO projects(id,name,path) VALUES(?,?,?)', (secrets.token_hex(8), p.name, str(p.resolve())))
 
 
 def get_codex_native_id(session_row: dict | None) -> str | None:

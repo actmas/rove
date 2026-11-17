@@ -94,6 +94,7 @@ Rove 是开源、自托管的网页 AI 编程工作台（Web UI），支持通�
 - **独立只读 `/review` 与死循环守卫 (`workstation/review.py` & `workstation/loop_guard.py`)**：在隔离只读子会话执行无开发记忆的代码/Git 复核（含未跟踪文件哈希防过期 Fail-Closed 校验），并在任务中自动拦截工具重复空转。
 - **零留痕保密代输入与视觉桥 (`workstation/input_handoff.py` & `workstation/vision_bridge.py`)**：敏感输入经 `0600` 临时 IPC 文件直达 Worker 后立即销毁、不落库；纯文本模型收到截图时自动转译描述。
 - **运行中队列、分叉 Fork、Doorbell Webhook 与 `rove-ui` (`workstation/fork.py`, `workstation/webhooks.py`, `workstation/rich_ui.py`)**：支持运行中消息排队/插话、任意轮次分叉会话、HMAC 验签的 GitHub 门铃事件唤醒，以及遵循 Anti-AI-Slop 语义配色的流式富卡片组件。
+- **隐藏 Git Ref 检查点、零项目 Scratch 与 ACP 协议驱动 (`workstation/checkpoints.py`, `workstation/scratch.py`, `workstation/agents.py`)**：每轮任务前自动写入 `refs/rove/checkpoints/<session>/<job>`（不污染 `HEAD` 与分支历史），支持单轮 Diff 预览与一键 `↺ 回滚`；支持免建项目直接启动 Scratch 临时会话并一键晋升为正式 Git 项目；内置 ACP (`Agent Client Protocol`) stdio JSON-RPC 2.0 驱动、`pruned_through_seq` 裁剪游标自愈、Diff 面板 Commit & Push、消息引用回复、`ArrowUp` 召回上条提示词与超长粘贴自动转附件。
 
 ---
 

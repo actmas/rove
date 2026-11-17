@@ -14,8 +14,9 @@ export default function Composer({
   error, onError, projects, projectId, onProjectChange, sessionLocked, sessionCwd,
   engine, onEngineChange, engineState, catalog,
   model, onModelChange, effort, onEffortChange, mode, onModeChange, fast, onFastChange,
-  onOpenSettings, externalRef,
+  onOpenSettings, externalRef, quotedRef, onClearQuote, lastPrompt,
 }) {
+  const [textAttachments, setTextAttachments] = useState([]);
   const [targetChoice, setTargetChoice] = useState(() => {
     if (initialExecutionTarget && initialExecutionTarget !== 'local') return initialExecutionTarget;
     try {
@@ -266,6 +267,14 @@ export default function Composer({
     if (imageFiles.length) {
       e.preventDefault();
       addFiles(imageFiles);
+    } else {
+      const pastedText = e.clipboardData?.getData('text/plain') || '';
+      if (pastedText.length >= 32768 && !e.shiftKey) {
+        e.preventDefault();
+        const kb = (pastedText.length / 1024).toFixed(1);
+        setTextAttachments(prev => [...prev, {name: `paste-${prev.length + 1}.txt`, sizeLabel: `${kb} KB`, text: pastedText}].slice(0, 5));
+        return;
+      }
     }
     requestAnimationFrame(() => adjustHeight(localRef.current));
   }
@@ -317,6 +326,12 @@ export default function Composer({
         return;
       }
     }
+    if (e.key === 'ArrowUp' && !prompt && lastPrompt && !mention) {
+      e.preventDefault();
+      setPrompt(lastPrompt);
+      requestAnimationFrame(() => adjustHeight(localRef.current));
+      return;
+    }
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
       e.preventDefault();
       handleSubmit(e);
@@ -328,8 +343,19 @@ export default function Composer({
     if (submit) {
       return submit(e);
     }
-    if ((!prompt.trim() && !images.length) || busy) return;
-    const trimmed = prompt.trim();
+    if ((!prompt.trim() && !images.length && !textAttachments.length) || busy) return;
+    const parts = [];
+    if (quotedRef) {
+      parts.push(`> 引用前序回复：\n> ${quotedRef.replace(/\n/g, '\n> ')}`);
+    }
+    if (prompt.trim()) {
+      parts.push(prompt.trim());
+    }
+    for (const att of textAttachments) {
+      parts.push(`[附加长文本片段 ${att.name} (${att.sizeLabel})]\n\`\`\`text\n${att.text}\n\`\`\``);
+    }
+    const finalPrompt = parts.join('\n\n');
+    const trimmed = finalPrompt.trim();
     if (sessionId && sessionId !== 'new' && /^\/review(?:\s+([\s\S]*))?$/i.test(trimmed)) {
       if (images.length) {
         onError?.('/review 命令暂不支持同时附加图片');
@@ -355,7 +381,7 @@ export default function Composer({
         return;
       }
       if (cloud && !cloudEnvironment.trim()) { onError?.('请填写 Codex 云端环境 ID'); return; }
-      const ok = await onSend(prompt, images, {execution_target: executionTarget, cloud_environment: cloudEnvironment.trim()});
+      const ok = await onSend(finalPrompt, images, {execution_target: executionTarget, cloud_environment: cloudEnvironment.trim()});
       if (ok) {
         if (cloud && cloudEnvironment.trim()) {
           try {
@@ -369,6 +395,8 @@ export default function Composer({
         try { sessionStorage.removeItem(draftStorageKey); } catch {}
         setPrompt('');
         setImages([]);
+        setTextAttachments([]);
+        onClearQuote?.();
         setMention(null);
         if (localRef.current) {
           localRef.current.style.height = '56px';
@@ -379,7 +407,7 @@ export default function Composer({
 
   const projectObj = projects.find(p => p.id === projectId);
   const busy = active || Boolean(externalActive) || sending;
-  const canSend = (prompt.trim().length > 0 || images.length > 0) && !busy;
+  const canSend = (prompt.trim().length > 0 || images.length > 0 || textAttachments.length > 0) && !busy;
   const workspaceProjects = projects.filter(p => p.is_workspace);
   const repoProjects = projects.filter(p => !p.is_workspace);
 
@@ -405,8 +433,29 @@ export default function Composer({
       <form className={`composer ${mode === 'plan' ? 'mode-plan' : mode === 'auto' ? 'mode-auto' : ''}`} onSubmit={handleSubmit}>
         {error && <div className="error composer-error" role="alert">{error}</div>}
 
-        {images.length > 0 && (
+        {(quotedRef || textAttachments.length > 0 || images.length > 0) && (
           <div className="composer-attachments">
+            {quotedRef && (
+              <div className="attachment-chip quote-chip" title={quotedRef}>
+                <span>引用：{quotedRef.slice(0, 36)}{quotedRef.length > 36 ? '…' : ''}</span>
+                <button type="button" aria-label="移除引用" onClick={onClearQuote}>
+                  <X size={12}/>
+                </button>
+              </div>
+            )}
+            {textAttachments.map((att, idx) => (
+              <div key={`txt-${idx}`} className="attachment-chip">
+                <FileCode size={13}/>
+                <span>{att.name} ({att.sizeLabel})</span>
+                <button
+                  type="button"
+                  aria-label="移除长文本附件"
+                  onClick={() => setTextAttachments(prev => prev.filter((_, i) => i !== idx))}
+                >
+                  <X size={12}/>
+                </button>
+              </div>
+            ))}
             {images.map((img, idx) => (
               <div key={idx} className="attachment-chip">
                 <img src={img.dataUrl} alt={img.name}/>

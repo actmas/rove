@@ -265,6 +265,32 @@ def compact_old_events(cutoff_timestamp: float | None = None, dry_run: bool = Fa
                 'total_events_pruned': codex_deltas_count + agy_steps_count,
             }
 
+        # Record pruned_through_seq watermark per session before deleting fragmented deltas
+        pruned_watermarks = conn.execute(f"""
+            SELECT session_id, MAX(id) FROM events
+            WHERE {scope_sql}
+              AND (
+                (kind = 'codex' AND json_extract(payload, '$.method') IN (
+                    'item/agentMessage/delta',
+                    'item/commandExecution/outputDelta',
+                    'item/reasoning/textDelta',
+                    'item/reasoning/summaryTextDelta',
+                    'item/plan/delta'
+                ))
+                OR (kind = 'antigravity' AND (
+                    (json_extract(payload, '$.event') = 'agy_step' AND (json_extract(payload, '$.completed') = 0 OR json_extract(payload, '$.completed') = false))
+                    OR json_extract(payload, '$.event') = 'step_update'
+                ))
+              )
+            GROUP BY session_id
+        """, scope_params).fetchall()
+        for sid, max_pruned_id in pruned_watermarks:
+            if max_pruned_id:
+                conn.execute(
+                    "UPDATE sessions SET pruned_through_seq = MAX(COALESCE(pruned_through_seq, 0), ?) WHERE id = ?",
+                    (max_pruned_id, sid),
+                )
+
         # Execute mutations
         conn.execute(f"""
             DELETE FROM events

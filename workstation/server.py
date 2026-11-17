@@ -29,7 +29,9 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import store as db
 from . import agents
+from . import checkpoints
 from . import cloud_execution
+from . import scratch
 from . import cluster_sync
 from . import engines
 from . import codex_sync
@@ -537,7 +539,7 @@ async def add_project(body: NewProject):
     if not any(path.is_relative_to(Path(root).resolve()) for root in db.config()['allowed_roots']):
         raise HTTPException(403, '目录不在本机配置的允许范围内')
     ident = secrets.token_hex(12)
-    db.execute('INSERT OR IGNORE INTO projects VALUES(?,?,?)', (ident, path.name, str(path)))
+    db.execute('INSERT OR IGNORE INTO projects(id,name,path) VALUES(?,?,?)', (ident, path.name, str(path)))
     return db.one('SELECT * FROM projects WHERE path=?', (str(path),))
 
 
@@ -725,7 +727,8 @@ async def get_session_worktree_diff(ident: str):
 
 
 class NewSession(BaseModel):
-    project_id: str
+    project_id: str | None = None
+    scratch: bool = False
     engine: str = Field(default='codex', min_length=2, max_length=40)
     title: str = Field(default='新会话', min_length=1, max_length=120)
     model: str | None = Field(default=None, max_length=120)
@@ -736,16 +739,64 @@ class NewSession(BaseModel):
 
 @app.post('/api/sessions')
 async def new_session(body: NewSession):
-    project(body.project_id)
+    if body.scratch or not body.project_id:
+        proj = await asyncio.to_thread(scratch.create_scratch_project, body.title)
+        proj_id = proj['id']
+    else:
+        project(body.project_id)
+        proj_id = body.project_id
     if not agents.is_valid_engine(body.engine):
         raise HTTPException(400, f'未知或未启用的 Agent 引擎：{body.engine}')
     model = clean_model(body.model)
     ident, now = secrets.token_hex(12), time.time()
     db.execute(
         'INSERT INTO sessions(id,project_id,engine,title,native_id,created,updated,model,effort,mode,fast,pinned) VALUES(?,?,?,?,NULL,?,?,?,?,?,?,0)',
-        (ident, body.project_id, body.engine, body.title.strip() or '新会话', now, now, model, body.effort, body.mode, int(body.fast)),
+        (ident, proj_id, body.engine, body.title.strip() or '新会话', now, now, model, body.effort, body.mode, int(body.fast)),
     )
     return session(ident)
+
+
+class PromoteScratchBody(BaseModel):
+    name: str | None = Field(default=None, max_length=120)
+    init_git: bool = True
+
+
+@app.post('/api/sessions/{ident}/promote')
+async def promote_scratch_session(ident: str, body: PromoteScratchBody | None = None):
+    s = session(ident)
+    req = body or PromoteScratchBody()
+    try:
+        updated_proj = await asyncio.to_thread(scratch.promote_scratch_project, s['project_id'], req.name, req.init_git)
+    except (ValueError, subprocess.CalledProcessError) as exc:
+        raise HTTPException(400, f'升级临时工作区失败：{exc}') from exc
+    return {'ok': True, 'project': updated_proj}
+
+
+@app.get('/api/sessions/{ident}/jobs/{job_id}/diff')
+async def job_turn_diff(ident: str, job_id: str):
+    s = session(ident)
+    p = project(s['project_id'])
+    job = db.one('SELECT * FROM jobs WHERE id=? AND session_id=?', (job_id, ident))
+    if not job:
+        raise HTTPException(404, '任务记录不存在')
+    workdir = db.session_workdir(s, p)
+    return await asyncio.to_thread(checkpoints.diff_checkpoint, workdir, job.get('checkpoint_ref') or '')
+
+
+@app.post('/api/sessions/{ident}/jobs/{job_id}/revert')
+async def revert_job_checkpoint(ident: str, job_id: str):
+    s = session(ident)
+    p = project(s['project_id'])
+    active = db.one("SELECT 1 FROM jobs WHERE session_id=? AND status IN ('queued','running','waiting') LIMIT 1", (ident,))
+    if active:
+        raise HTTPException(409, '当前会话有任务正在运行，请先停止后再回滚检查点')
+    workdir = db.session_workdir(s, p)
+    try:
+        return await asyncio.to_thread(checkpoints.revert_to_checkpoint, workdir, ident, job_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 class SessionPatch(BaseModel):
@@ -1494,10 +1545,16 @@ async def stream(ws: WebSocket, ident: str, after: int = 0):
     if ws.headers.get('origin') not in db.config()['origins'] or not logged_in(ws.cookies.get(COOKIE)):
         await ws.close(code=4401)
         return
-    session(ident)
+    s = session(ident)
     await ws.accept()
     last_sent_ts = time.monotonic()
     try:
+        pruned_seq = int(s.get('pruned_through_seq') or 0)
+        if 0 < after < pruned_seq:
+            snap = await asyncio.to_thread(_build_session_snapshot, ident, 0)
+            after = snap['cursor']
+            await ws.send_json({'reset': True, 'pruned_through_seq': pruned_seq, 'snapshot': snap})
+            last_sent_ts = time.monotonic()
         while logged_in(ws.cookies.get(COOKIE)):
             await _sync_session_events(ident)
             batch = events(ident, after)
@@ -2579,6 +2636,48 @@ async def diff(ident: str, session_id: str | None = None):
     }
 
 
+class GitCommitBody(BaseModel):
+    message: str = Field(min_length=1, max_length=500)
+    session_id: str | None = None
+    stage_all: bool = True
+
+
+@app.post('/api/projects/{ident}/git/commit')
+async def git_commit(ident: str, body: GitCommitBody):
+    p = project(ident)
+    workdir = str(_project_base(p, body.session_id))
+    if body.stage_all:
+        rc_add, out_add = await asyncio.to_thread(git_run, workdir, 'add', '-A')
+        if rc_add != 0:
+            raise HTTPException(409, f'git add 失败：{out_add}')
+    rc, out = await asyncio.to_thread(
+        git_run, workdir, '-c', 'user.name=Rove Workstation', '-c', 'user.email=rove@local',
+        'commit', '-m', body.message.strip(),
+    )
+    if rc != 0:
+        raise HTTPException(409, out.strip() or '提交失败（可能工作区无改动）')
+    return {'ok': True, 'output': out.strip()}
+
+
+class GitPushBody(BaseModel):
+    session_id: str | None = None
+
+
+@app.post('/api/projects/{ident}/git/push')
+async def git_push(ident: str, body: GitPushBody | None = None):
+    p = project(ident)
+    req = body or GitPushBody()
+    workdir = str(_project_base(p, req.session_id))
+    proc = await asyncio.to_thread(
+        subprocess.run,
+        ['git', '-C', workdir, 'push'],
+        capture_output=True, text=True, timeout=30,
+    )
+    if proc.returncode != 0:
+        raise HTTPException(409, (proc.stderr or proc.stdout or 'git push 失败')[:1000])
+    return {'ok': True, 'output': (proc.stdout or proc.stderr or '已推送至远端').strip()}
+
+
 @app.api_route('/healthz', methods=['GET', 'HEAD'])
 async def health(cf_auth: bool = False):
     # This path bypasses even older PWA workers, allowing a top-level Access challenge.
@@ -2767,7 +2866,7 @@ class AgentUpsertBody(BaseModel):
     name: str | None = Field(default=None, max_length=80)
     short_name: str | None = Field(default=None, max_length=24)
     description: str | None = Field(default=None, max_length=500)
-    adapter: Literal['cli', 'openai_http'] | None = None
+    adapter: Literal['cli', 'openai_http', 'acp'] | None = None
     enabled: bool = True
     tone: str | None = Field(default=None, max_length=24)
     binary: str | None = Field(default=None, max_length=1024)

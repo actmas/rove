@@ -10,6 +10,7 @@ import time
 
 from . import store as db
 from . import agents
+from . import checkpoints
 from . import cloud_execution
 from . import engines
 from . import codex_sync
@@ -493,6 +494,13 @@ async def run(ident):
             return
     session = db.one('SELECT * FROM sessions WHERE id=?', (job['session_id'],))
     project = db.one('SELECT * FROM projects WHERE id=?', (session['project_id'],))
+    if job.get('execution_target') != 'cloud':
+        with contextlib.suppress(Exception):
+            workdir = db.session_workdir(session, project)
+            ckpt_ref = checkpoints.capture_checkpoint(workdir, session['id'], ident)
+            if ckpt_ref:
+                db.execute('UPDATE jobs SET checkpoint_ref=? WHERE id=?', (ckpt_ref, ident))
+                job['checkpoint_ref'] = ckpt_ref
     active_engine = job.get('engine') or session.get('engine') or 'codex'
     db.event(session['id'], ident, 'job_status', {
         'status': 'running',

@@ -205,6 +205,21 @@ export function formatFileSize(bytes) {
   return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
+export const getJobTurnDiff = (sessionId, jobId) =>
+  api(`sessions/${encodeURIComponent(sessionId)}/jobs/${encodeURIComponent(jobId)}/diff`);
+
+export const revertJobCheckpoint = (sessionId, jobId) =>
+  post(`sessions/${encodeURIComponent(sessionId)}/jobs/${encodeURIComponent(jobId)}/revert`, {});
+
+export const promoteScratchSession = (sessionId, payload = {}) =>
+  post(`sessions/${encodeURIComponent(sessionId)}/promote`, payload);
+
+export const gitCommitProject = (projectId, payload) =>
+  post(`projects/${encodeURIComponent(projectId)}/git/commit`, payload);
+
+export const gitPushProject = (projectId, payload = {}) =>
+  post(`projects/${encodeURIComponent(projectId)}/git/push`, payload);
+
 export function requestId() {
   return globalThis.crypto?.randomUUID?.() || Array.from(globalThis.crypto.getRandomValues(new Uint8Array(20)), n => n.toString(16).padStart(2, '0')).join('');
 }

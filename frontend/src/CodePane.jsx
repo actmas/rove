@@ -3,7 +3,7 @@ import {
   Folder, FileCode, ChevronRight, ArrowLeft, RefreshCw, GitBranch,
   Search, Copy, Check, AtSign, FileDiff, Download, ExternalLink, FileArchive,
 } from 'lucide-react';
-import {api, parseUnifiedDiff, fileUrl, downloadFile, fileMetaApiPath, formatFileSize} from './api';
+import {api, parseUnifiedDiff, fileUrl, downloadFile, fileMetaApiPath, formatFileSize, gitCommitProject, gitPushProject} from './api';
 
 function FileDiffCard({item, onOpenFile, onMentionFile}) {
   return (
@@ -55,6 +55,41 @@ export default function CodePane({project, sessionId, onError, initialFile, onCo
   const [searchResults, setSearchResults] = useState([]);
   const [copied, setCopied] = useState(false);
   const [maxDisplayLines, setMaxDisplayLines] = useState(600);
+  const [commitMsg, setCommitMsg] = useState('');
+  const [gitBusy, setGitBusy] = useState(false);
+  const [gitFeedback, setGitFeedback] = useState('');
+
+  async function handleGitCommit(e) {
+    e.preventDefault();
+    if (!project || !commitMsg.trim() || gitBusy) return;
+    setGitBusy(true);
+    setGitFeedback('');
+    try {
+      const res = await gitCommitProject(project.id, {message: commitMsg.trim(), session_id: sessionId || null});
+      setCommitMsg('');
+      setGitFeedback(res.output || '已提交到本地仓库');
+      await loadDiff();
+    } catch (err) {
+      onError(err.message);
+    } finally {
+      setGitBusy(false);
+    }
+  }
+
+  async function handleGitPush() {
+    if (!project || gitBusy) return;
+    setGitBusy(true);
+    setGitFeedback('');
+    try {
+      const res = await gitPushProject(project.id, {session_id: sessionId || null});
+      setGitFeedback(res.output || '已推送到远端仓库');
+      await loadDiff();
+    } catch (err) {
+      onError(err.message);
+    } finally {
+      setGitBusy(false);
+    }
+  }
 
   const sessionQuery = sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : '';
   const diffQuery = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
@@ -222,6 +257,22 @@ export default function CodePane({project, sessionId, onError, initialFile, onCo
             <div className="diff-container">
               <div className="status-card">
                 <h3>工作区概览</h3>
+                <form className="git-commit-bar" onSubmit={handleGitCommit}>
+                  <input
+                    type="text"
+                    placeholder="输入 Commit 说明后一键提交…"
+                    value={commitMsg}
+                    onChange={e => setCommitMsg(e.target.value)}
+                    disabled={gitBusy}
+                  />
+                  <button type="submit" className="primary" disabled={gitBusy || !commitMsg.trim() || statusLines.length === 0}>
+                    提交
+                  </button>
+                  <button type="button" onClick={handleGitPush} disabled={gitBusy}>
+                    推送
+                  </button>
+                </form>
+                {gitFeedback && <small className="sync-feedback">{gitFeedback}</small>}
                 {statusLines.length === 0 ? (
                   <p className="clean-tree">工作区干净，没有未提交的修改。</p>
                 ) : (

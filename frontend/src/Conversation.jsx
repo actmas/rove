@@ -806,6 +806,9 @@ const AgentOrErrorMessageItem = memo(function AgentOrErrorMessageItem({
   active,
   onSwitchAndRetry,
   onError,
+  onQuoteText,
+  onRevertJob,
+  composerInputRef,
 }) {
   const effectiveEngine = m.engine || sessionEngine || 'codex';
   const isAgy = effectiveEngine === 'antigravity';
@@ -838,6 +841,34 @@ const AgentOrErrorMessageItem = memo(function AgentOrErrorMessageItem({
       <div className="speaker answer-header">
         {tile}
         <div className="answer-header-actions">
+          {isAnswer && !active && onQuoteText && (
+            <button
+              type="button"
+              className="switch-retry-btn"
+              title="引用选中文字（或本条回复）到输入框追问"
+              onClick={() => {
+                const sel = window.getSelection?.()?.toString().trim();
+                onQuoteText(sel || (m.text || '').slice(0, 240));
+                composerInputRef?.current?.focus();
+              }}
+            >
+              <span>引用</span>
+            </button>
+          )}
+          {isAnswer && !active && m.jobId && onRevertJob && (
+            <button
+              type="button"
+              className="switch-retry-btn"
+              title="将代码与对话回滚到本回合执行前检查点"
+              onClick={() => {
+                if (window.confirm('确认将代码工作区与对话历史回滚到该回合执行前状态？')) {
+                  onRevertJob(m.jobId);
+                }
+              }}
+            >
+              <span>↺ 回滚</span>
+            </button>
+          )}
           {isAnswer && !active && m.promptText && onSwitchAndRetry && (
             <button
               type="button"
@@ -997,6 +1028,7 @@ export default function Conversation({
   projects, projectId, onProjectChange, engine, onEngineChange, engineState, catalog,
   model, onModelChange, effort, onEffortChange, mode, onModeChange, fast, onFastChange,
   onOpenSettings, onInspectFile, composerInputRef,
+  quotedRef, onClearQuote, onQuoteText, lastPrompt, onRevertJob,
 }) {
   const [approvals, setApprovals] = useState([]);
   const [atBottom, setAtBottom] = useState(true);
@@ -1306,6 +1338,9 @@ export default function Conversation({
       fast={fast}
       onFastChange={onFastChange}
       onOpenSettings={onOpenSettings}
+      quotedRef={quotedRef}
+      onClearQuote={onClearQuote}
+      lastPrompt={lastPrompt}
     />
   );
 
@@ -1457,6 +1492,9 @@ export default function Conversation({
                 active={active}
                 onSwitchAndRetry={onSwitchAndRetry}
                 onError={onError}
+                onQuoteText={onQuoteText}
+                onRevertJob={onRevertJob}
+                composerInputRef={composerInputRef}
               />
             );
           })}

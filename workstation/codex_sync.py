@@ -174,7 +174,7 @@ def _sync_allowed_roots_and_projects(home: Path) -> int:
             name = f'{folder.parent.name}/{folder.name}'
         used_names.add(name)
         ident = secrets.token_hex(8)
-        db.execute('INSERT OR IGNORE INTO projects VALUES(?,?,?)', (ident, name, resolved_str))
+        db.execute('INSERT OR IGNORE INTO projects(id,name,path) VALUES(?,?,?)', (ident, name, resolved_str))
         row = db.one('SELECT * FROM projects WHERE path=?', (resolved_str,))
         if row:
             by_path[resolved_str] = row

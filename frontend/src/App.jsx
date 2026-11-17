@@ -11,7 +11,7 @@ import {
 import {
   api, post, patch, del, base, requestId, statusText, activeStates,
   downloadMarkdown, effortBadge, modeBadge, STATE_CACHE_KEY, clearCachedState, probeCloudflareAccessRedirect,
-  purgeCacheAndReload,
+  purgeCacheAndReload, revertJobCheckpoint, promoteScratchSession,
 } from './api';
 import {usePwaManager, clearAppBadgeSafe} from './pwa';
 import {deleteHistory} from './historyCache';
@@ -176,6 +176,8 @@ export default function App() {
   const [editingTitle, setEditingTitle] = useState('');
   const [confirmDeleteId, setConfirmDeleteId] = useState('');
   const [copiedNative, setCopiedNative] = useState(false);
+  const [quotedRef, setQuotedRef] = useState(null);
+  const [lastPrompt, setLastPrompt] = useState('');
   const [quotaOpen, setQuotaOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [worktreeOpen, setWorktreeOpen] = useState(false);
@@ -505,7 +507,17 @@ export default function App() {
       ws.onmessage = event => {
         if (dead) return;
         lastMessage = Date.now();
-        try { accept(JSON.parse(event.data).events); } catch { fallback(); }
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.reset && msg.snapshot) {
+            historyIds.clear();
+            for (const ev of (msg.snapshot.events || [])) historyIds.add(ev.id);
+            setHistoryPage(msg.snapshot);
+            store(msg.snapshot.events || [], msg.snapshot.cursor || 0, true);
+            return;
+          }
+          accept(msg.events);
+        } catch { fallback(); }
       };
       ws.onclose = event => {
         if (dead) return;
@@ -763,6 +775,7 @@ export default function App() {
         images: attachedImages.map(img => img.dataUrl),
       });
       pendingRequest.current = null;
+      if (text && text.trim()) setLastPrompt(text);
       try { sessionStorage.removeItem('rove-pending-request'); } catch {}
       await refresh();
       return true;
@@ -797,6 +810,46 @@ export default function App() {
     }
   }
 
+  async function handleRevertJob(jobId) {
+    if (!selected || !jobId) return;
+    try {
+      await revertJobCheckpoint(selected, jobId);
+      const snap = await api(`sessions/${selected}/snapshot`);
+      setHistoryPage(snap);
+      setEvents(snap.events || []);
+      await refresh();
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
+  async function createScratchSession() {
+    try {
+      const created = await post('sessions', {
+        scratch: true,
+        engine: newEngine,
+        model: newModel,
+        effort: newEffort,
+        mode: newMode,
+        fast: newFast,
+      });
+      await refresh();
+      setSelected(created.id);
+      setSidebarOpen(false);
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
+  async function handlePromoteScratch() {
+    if (!selected) return;
+    try {
+      await promoteScratchSession(selected, {init_git: true});
+      await refresh();
+    } catch (e) {
+      setError(e.message);
+    }
+  }
   async function stop() {
     try {
       await post(`sessions/${selected}/stop`);
@@ -1485,6 +1538,32 @@ export default function App() {
                   </button>
                 )}
 
+                {activeProject?.is_scratch ? (
+                  <button
+                    type="button"
+                    className="popover-item"
+                    onClick={handlePromoteScratch}
+                  >
+                    <Folder size={15} style={{color: '#3b82f6'}}/>
+                    <div className="popover-item-text">
+                      <span className="popover-item-title">升级为正式 Git 项目</span>
+                      <span className="popover-item-sub">初始化 Git 仓库并解锁 Diff 与 Worktree</span>
+                    </div>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="popover-item"
+                    onClick={createScratchSession}
+                  >
+                    <Sparkles size={15} style={{color: '#f59e0b'}}/>
+                    <div className="popover-item-text">
+                      <span className="popover-item-title">新建零项目临时会话 (Scratch)</span>
+                      <span className="popover-item-sub">无需预先创建目录，直接开聊并可随时转正</span>
+                    </div>
+                  </button>
+                )}
+
                 <div className="popover-divider"/>
 
                 <button
@@ -1590,6 +1669,12 @@ export default function App() {
                 onOpenSettings={() => setSettings(true)}
                 onInspectFile={handleInspectFile}
                 composerInputRef={composerInputRef}
+                quotedRef={quotedRef}
+                onClearQuote={() => setQuotedRef(null)}
+                onQuoteText={txt => setQuotedRef(txt)}
+                lastPrompt={lastPrompt}
+                onCreateScratch={createScratchSession}
+                onRevertJob={handleRevertJob}
               />
             ) : (
               <>

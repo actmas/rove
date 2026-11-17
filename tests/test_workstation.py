@@ -35,7 +35,7 @@ class WorkstationTests(unittest.TestCase):
         config['allowed_roots'] = [str(self.project)]
         db.write_private(db.DATA / 'config.json', json.dumps(config))
         db.execute('DELETE FROM projects')
-        db.execute('INSERT INTO projects VALUES(?,?,?)', ('project', 'test', str(self.project)))
+        db.execute('INSERT INTO projects(id,name,path) VALUES(?,?,?)', ('project', 'test', str(self.project)))
         self.client = TestClient(app, base_url='http://localhost:8765')
         self.client.__enter__()
         self.headers = {'X-Workstation': '1', 'Origin': 'http://localhost:8765'}
