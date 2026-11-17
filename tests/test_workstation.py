@@ -76,6 +76,58 @@ class WorkstationTests(unittest.TestCase):
         self.client.cookies.clear()
         self.assertEqual(self.client.get('/api/media', params={'path': str(image)}).status_code, 401)
 
+    def test_task_generated_files_view_and_download(self):
+        sid = self.session()
+        report = self.project / '输出报告.md'
+        report.write_text('# 任务结果\n\n完成。\n', encoding='utf-8')
+        archive = self.project / 'bundle.zip'
+        archive.write_bytes(b'PK\x03\x04\x00\x00binary')
+        html_file = self.project / 'preview.html'
+        html_file.write_text('<h1>Hi</h1><script>alert(1)</script>', encoding='utf-8')
+        (self.project / '.env').write_text('SECRET=123', encoding='utf-8')
+
+        # 1. Meta & inline view via relative path, file://, sandbox:, and :line suffix
+        meta = self.client.get('/api/files/meta', params={'path': '输出报告.md:12', 'session_id': sid})
+        self.assertEqual(meta.status_code, 200)
+        payload = meta.json()
+        self.assertEqual(payload['name'], '输出报告.md')
+        self.assertEqual(payload['kind'], 'markdown')
+        self.assertEqual(payload['relative_path'], '输出报告.md')
+        self.assertIn('任务结果', payload['preview_text'])
+
+        raw_file_url = self.client.get('/api/files', params={'path': f'file://{report}', 'session_id': sid})
+        self.assertEqual(raw_file_url.status_code, 200)
+        self.assertIn('任务结果', raw_file_url.text)
+
+        sandbox_dl = self.client.get(
+            '/api/files',
+            params={'path': f'sandbox:{archive}', 'session_id': sid, 'download': '1'},
+        )
+        self.assertEqual(sandbox_dl.status_code, 200)
+        self.assertEqual(sandbox_dl.content, b'PK\x03\x04\x00\x00binary')
+        self.assertIn('attachment;', sandbox_dl.headers.get('content-disposition', ''))
+
+        # 2. Unicode download filename header
+        cn_dl = self.client.get('/api/files', params={'path': '输出报告.md', 'session_id': sid, 'download': '1'})
+        self.assertEqual(cn_dl.status_code, 200)
+        self.assertIn("filename*=UTF-8''", cn_dl.headers.get('content-disposition', ''))
+
+        # 3. HTML inline view enforces sandbox CSP
+        html_resp = self.client.get('/api/files', params={'path': 'preview.html', 'session_id': sid})
+        self.assertEqual(html_resp.status_code, 200)
+        self.assertIn('sandbox', html_resp.headers.get('content-security-policy', ''))
+
+        # 4. Security: sensitive dotfiles and symlink escapes are blocked; missing returns 404
+        self.assertEqual(self.client.get('/api/files', params={'path': '.env', 'session_id': sid}).status_code, 403)
+        outside = Path(self.temp.name) / 'secret.txt'
+        outside.write_text('nope', encoding='utf-8')
+        (self.project / 'escape.txt').symlink_to(outside)
+        self.assertEqual(self.client.get('/api/files', params={'path': 'escape.txt', 'session_id': sid}).status_code, 403)
+        self.assertEqual(self.client.get('/api/files', params={'path': 'missing.txt', 'session_id': sid}).status_code, 404)
+
+        self.client.cookies.clear()
+        self.assertEqual(self.client.get('/api/files', params={'path': str(report)}).status_code, 401)
+
     def test_auth_csrf_logout_and_cookie(self):
         self.assertEqual(self.client.get('/api/state').status_code, 200)
         self.assertEqual(self.client.post('/api/logout').status_code, 403)
@@ -1650,6 +1702,31 @@ class WorkstationTests(unittest.TestCase):
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
+
+    def test_file_download_preserves_media_type_and_allows_session_cwd(self):
+        extra_cwd = Path(self.temp.name) / 'external_cwd'
+        extra_cwd.mkdir(parents=True)
+        video_file = extra_cwd / 'ROVE-测试视频.mp4'
+        video_file.write_bytes(b'\x00\x00\x00\x18ftypmp42')
+
+        sess = self.post('sessions', {'project_id': 'project'}).json()
+        db.execute('UPDATE sessions SET cwd=? WHERE id=?', (str(extra_cwd), sess['id']))
+
+        meta_res = self.client.get(
+            '/api/files/meta',
+            params={'path': 'ROVE-测试视频.mp4', 'session_id': sess['id']},
+        )
+        self.assertEqual(meta_res.status_code, 200, meta_res.text)
+        self.assertEqual(meta_res.json()['kind'], 'video')
+
+        dl_res = self.client.get(
+            '/api/files',
+            params={'path': str(video_file), 'session_id': sess['id'], 'download': '1'},
+        )
+        self.assertEqual(dl_res.status_code, 200, dl_res.text)
+        self.assertEqual(dl_res.headers.get('content-type'), 'video/mp4')
+        self.assertIn('attachment;', dl_res.headers.get('content-disposition', ''))
+        self.assertIn("filename*=UTF-8''ROVE-%E6%B5%8B%E8%AF%95%E8%A7%86%E9%A2%91.mp4", dl_res.headers.get('content-disposition', ''))
 
 
 if __name__ == '__main__':

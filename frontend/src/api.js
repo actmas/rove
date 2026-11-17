@@ -109,6 +109,102 @@ export function uploadUrl(sessionId, filename) {
   return new URL(`api/sessions/${sessionId}/uploads/${encodeURIComponent(filename)}`, base).toString();
 }
 
+export function fileUrl(filePath, {sessionId, projectId, download = false} = {}) {
+  const url = new URL('api/files', base);
+  url.searchParams.set('path', String(filePath || '').trim());
+  if (sessionId) url.searchParams.set('session_id', sessionId);
+  if (projectId) url.searchParams.set('project_id', projectId);
+  if (download) url.searchParams.set('download', '1');
+  return url.toString();
+}
+
+export function fileMetaApiPath(filePath, {sessionId, projectId} = {}) {
+  const params = new URLSearchParams({path: String(filePath || '').trim()});
+  if (sessionId) params.set('session_id', sessionId);
+  if (projectId) params.set('project_id', projectId);
+  return `files/meta?${params.toString()}`;
+}
+
+function parseContentDispositionFilename(headerValue) {
+  if (!headerValue) return '';
+  const utf8Match = headerValue.match(/filename\*\s*=\s*UTF-8''([^;]+)/i);
+  if (utf8Match) {
+    try {
+      return decodeURIComponent(utf8Match[1].trim().replace(/^"|"$/g, ''));
+    } catch {}
+  }
+  const plainMatch = headerValue.match(/filename\s*=\s*"([^"]+)"|filename\s*=\s*([^;\s]+)/i);
+  return (plainMatch?.[1] || plainMatch?.[2] || '').trim();
+}
+
+export async function downloadFile(filePath, {sessionId, projectId, filename, onError} = {}) {
+  const url = fileUrl(filePath, {sessionId, projectId, download: true});
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      credentials: 'same-origin',
+      headers: {'X-Workstation': '1'},
+    });
+    if (res.redirected && new URL(res.url).hostname.endsWith('cloudflareaccess.com')) {
+      throw new Error('Cloudflare Access 登录已过期，请重新验证');
+    }
+    if (!res.ok) {
+      if (res.status === 401) {
+        window.dispatchEvent(new Event('workstation-locked'));
+      }
+      let message = '下载失败，请重试';
+      try {
+        const body = await res.json();
+        if (typeof body?.detail === 'string') message = body.detail;
+      } catch {}
+      throw new Error(message);
+    }
+    const disposition = res.headers.get('content-disposition') || '';
+    if (!/attachment/i.test(disposition)) {
+      throw new Error('服务器未返回有效文件，请刷新后重试');
+    }
+    const blob = await res.blob();
+    const resolvedName = filename
+      || parseContentDispositionFilename(disposition)
+      || String(filePath || '').split('/').pop()
+      || 'download';
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = blobUrl;
+    a.download = resolvedName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 1500);
+    return true;
+  } catch (err) {
+    onError?.(err?.message || '下载文件失败');
+    return false;
+  }
+}
+
+export function isLocalFileHref(href) {
+  if (typeof href !== 'string') return false;
+  const raw = href.trim();
+  if (!raw || raw.startsWith('#')) return false;
+  if (/^(https?:|mailto:|tel:|data:|blob:|javascript:)/i.test(raw)) return false;
+  if (/^\/(api|assets)\//i.test(raw)) return false;
+  if (/^(file:\/\/|sandbox:)/i.test(raw)) return true;
+  if (raw.startsWith('/') || raw.startsWith('~/') || raw.startsWith('./') || raw.startsWith('../')) return true;
+  // Relative file path like "docs/report.md" or "output.pdf"
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(raw)) return true;
+  return false;
+}
+
+export function formatFileSize(bytes) {
+  const n = Number(bytes);
+  if (!Number.isFinite(n) || n < 0) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
 export function requestId() {
   return globalThis.crypto?.randomUUID?.() || Array.from(globalThis.crypto.getRandomValues(new Uint8Array(20)), n => n.toString(16).padStart(2, '0')).join('');
 }

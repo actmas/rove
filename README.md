@@ -77,9 +77,12 @@ Rove 是开源、自托管的网页 AI 编程工作台（Web UI），支持通�
 - **Anti-AI-Slop 前端审美守卫 (`workstation/design_guard.py`)**：识别前端/UI 任务时自动注入项目设计规范（拒绝俗套紫粉霓虹渐变与浓黑大阴影，推行中性表面分层、`1px` 半透明微边框、细腻圆角与完整 `:hover/:active/:focus-visible` 状态机），并提供代码静态审计。
 
 ### 3. 全场景多端触点与原子审批
-- **PWA 独立应用与自托管 Web Push (`workstation/webpush.py`)**：内置 RFC 8292 (`ES256`) VAPID 签名与 RFC 8291 (`aes128gcm`) 端到端加密推送引擎（基于系统 `libcrypto`，零第三方推送 SaaS 依赖）。当后台任务等待权限审批或执行完成时，实时推送到 iOS / Android 锁屏通知中心。
-- **墨水屏极简审批台 (`/eink`) & 智能手表监控 (`/watch/live`)**：专为 Kindle/文石等墨水屏浏览器定制的高对比度零动画审批视图，以及适合 Apple Watch / 小屏设备的实时进度监控页。
-- **飞书多端协同机器人 (`workstation/feishu_relay.py`)**：高危命令待审批与任务完成主动推送至飞书，支持直接回复 `/approve <id>` 或 `/reject <id>` 远程决策，与网页、墨水屏共享 SQLite 事务级原子审批锁 (`store.decide_approval`)。
+- **PWA 独立应用与自托管 Web Push (`workstation/webpush.py`)**：内置 RFC 8292 (`ES256`) VAPID 签名与 RFC 8291 (`aes128gcm`) 端到端加密推送引擎（基于系统 `libcrypto`，零第三方推送 SaaS 依赖）。后台任务等待权限审批或执行完成时实时推送到 iPhone / Android 锁屏，并在设置页提供「测试手机/手表审批推送」调试入口；iPhone 锁屏推送自动镜像至配对 Apple Watch。
+- **Apple Watch 快速审批 & 墨水屏审批台 (`/watch/live`, `/eink`, `ios-companion/RoveWatch`)**：
+  - **Apple Watch 快捷指令 1 步审批**：`POST /api/watch/approve?token=...`（支持省略 `approval_id` 自动审批最新请求）与 `GET /api/watch/pending?token=...` 专为手表/iPhone 快捷指令设计，可在 Rove 设置页一键复制审批接口与 JSON 载荷（若公网启用 Cloudflare Access，可为 `/api/watch/*` 配置 Bypass 规则，接口由独立 Watch Token 鉴权）。
+  - **Watch 实时审批页 & 原生手表应用**：`/watch/live` 与 `ios-companion/RoveWatch` 原生 watchOS Target 均支持实时进度与「批准执行 / 拒绝」操作；`/eink` 为 Kindle/文石等墨水屏浏览器定制高对比度零动画审批台。
+- **飞书多端协同机器人 (`workstation/feishu_relay.py`)**：高危命令待审批与任务完成主动推送至飞书，支持直接回复 `/approve <id>` 或 `/reject <id>` 远程决策，与网页、Watch、墨水屏共享 SQLite 事务级原子审批锁 (`store.decide_approval`)。
+- **通用文件在线预览与安全下载 (`FilePreviewModal.jsx`, `/api/files`)**：支持在对话与代码树中直接预览或下载项目内 Markdown、PDF、图片、音视频及文本源码文件，严格校验项目目录边界。
 
 ### 4. 数据生命周期治理与 PVE 跨平台容灾自愈
 - **SQLite 事件压缩与在线瘦身 (`workstation/retention.py`)**：一键诊断表空间占用，自动精简已结束会话的流式 `delta` 碎片与内嵌大图 Blob（保留完整对话与代码变更），支持 Dry-Run 演练、自动备份与在线 `VACUUM`。

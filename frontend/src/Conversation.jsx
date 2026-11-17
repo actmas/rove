@@ -5,7 +5,7 @@ import {
   Brain, Sparkles, CheckCircle2, Circle, Loader2, ArrowDown, FileDiff,
   Globe, Wrench, Eye, Zap, GitBranch, Bug, Layers, User,
   Bot, AlertTriangle, Info, FileText, Plug, ListChecks, Gauge, Hourglass, RefreshCw,
-  ChevronDown, ChevronUp, ArrowLeftRight,
+  ChevronDown, ChevronUp, ArrowLeftRight, Download,
 } from 'lucide-react';
 import {imageSource} from './images';
 import {createEventParser} from './eventParser';
@@ -13,11 +13,12 @@ export {parseEvents} from './eventParser';
 import Composer from './Composer';
 import SessionQuota from './SessionQuota';
 import CloudTaskCard from './CloudTaskCard';
+import FilePreviewModal from './FilePreviewModal';
 import RichUiBlock from './RichUiBlock';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
-  api, post, activeStates, uploadUrl, effortBadge, modeBadge, base,
+  api, post, activeStates, uploadUrl, effortBadge, modeBadge, base, fileUrl, downloadFile, isLocalFileHref,
 } from './api';
 
 function SafeMarkdown({children, components, onSend}) {
@@ -305,20 +306,65 @@ export function isPreciseFilePath(raw) {
   return PRECISE_PATH_RE.test(text);
 }
 
-const markdownComponents = {
-  pre: CodeBlock,
-  a: ({children, ...props}) => <a {...props} target="_blank" rel="noreferrer">{children}</a>,
-  code: ({inline, className, children, ...props}) => {
-    const raw = String(children || '').trim();
-    if ((inline || !className) && isPreciseFilePath(raw)) {
+function MarkdownLink({href = '', children, ...props}) {
+  const {sessionId, projectId, onPreviewFile, onError} = useContext(ImageContext);
+  if (isLocalFileHref(href)) {
+    const cleanHref = href.trim();
+    return (
+      <span className="rove-file-link-group">
+        <button
+          type="button"
+          className="rove-file-link"
+          title={`查看或下载文件: ${cleanHref}`}
+          onClick={() => onPreviewFile?.(cleanHref)}
+        >
+          <FileText size={13}/>
+          <span>{children}</span>
+        </button>
+        <button
+          type="button"
+          className="rove-file-dl"
+          title={`下载 ${cleanHref}`}
+          aria-label={`下载 ${cleanHref}`}
+          onClick={() => downloadFile(cleanHref, {sessionId, projectId, onError})}
+        >
+          <Download size={12}/>
+        </button>
+      </span>
+    );
+  }
+  return <a href={href} {...props} target="_blank" rel="noreferrer">{children}</a>;
+}
+
+function MarkdownCode({inline, className, children, ...props}) {
+  const {onPreviewFile} = useContext(ImageContext);
+  const raw = String(children || '').trim();
+  if ((inline || !className) && isPreciseFilePath(raw)) {
+    if (raw.endsWith('/')) {
       return (
-        <code className="rove-file-chip" title={`文件路径: ${raw}`} {...props}>
+        <code className="rove-file-chip" title={`目录路径: ${raw}`} {...props}>
           {children}
         </code>
       );
     }
-    return <code className={className} {...props}>{children}</code>;
-  },
+    return (
+      <button
+        type="button"
+        className="rove-file-chip is-clickable"
+        title={`点击查看或下载文件: ${raw}`}
+        onClick={() => onPreviewFile?.(raw)}
+      >
+        <code {...props}>{children}</code>
+      </button>
+    );
+  }
+  return <code className={className} {...props}>{children}</code>;
+}
+
+const markdownComponents = {
+  pre: CodeBlock,
+  a: MarkdownLink,
+  code: MarkdownCode,
   img: RenderedImage,
 };
 
@@ -670,6 +716,7 @@ const CommandMessageItem = memo(function CommandMessageItem({item: m, active}) {
 });
 
 const ChangeMessageItem = memo(function ChangeMessageItem({item: m, onInspectFile}) {
+  const {sessionId, projectId, onPreviewFile, onError} = useContext(ImageContext);
   const changes = m.changes || [];
   const [isOpen, setIsOpen] = useState(() => changes.length <= 3);
   const counts = changes.reduce((acc, c) => {
@@ -706,6 +753,22 @@ const ChangeMessageItem = memo(function ChangeMessageItem({item: m, onInspectFil
                       onClick={() => onInspectFile(c.path)}
                     >
                       <Eye size={12}/>查看
+                    </button>
+                  )}
+                  {kindType !== 'delete' && (
+                    <button
+                      type="button"
+                      className="link-btn"
+                      title={`下载 ${c.path}`}
+                      onClick={() => {
+                        if (!sessionId && !projectId && onPreviewFile) {
+                          onPreviewFile(c.path);
+                          return;
+                        }
+                        downloadFile(c.path, {sessionId, projectId, onError});
+                      }}
+                    >
+                      <Download size={12}/>下载
                     </button>
                   )}
                 </div>
@@ -938,6 +1001,7 @@ export default function Conversation({
   const [approvals, setApprovals] = useState([]);
   const [atBottom, setAtBottom] = useState(true);
   const [previewImg, setPreviewImg] = useState(null);
+  const [previewFile, setPreviewFile] = useState(null);
   const [visibleTurnIdx, setVisibleTurnIdx] = useState(0);
   const [scrubState, setScrubState] = useState({ active: false, index: null, topPx: 0 });
   const [maxRenderTurns, setMaxRenderTurns] = useState(6);
@@ -1293,7 +1357,7 @@ export default function Conversation({
   const highlightedIdx = scrubState.active && scrubState.index != null ? scrubState.index : visibleTurnIdx;
 
   return (
-    <ImageContext.Provider value={{sessionId: session?.id, onPreview: setPreviewImg}}>
+    <ImageContext.Provider value={{sessionId: session?.id, projectId: session?.project_id, onPreview: setPreviewImg, onPreviewFile: setPreviewFile, onError}}>
     <div className="conversation chat-conversation">
       <div
         className="messages"
@@ -1548,6 +1612,17 @@ export default function Conversation({
             <img src={previewImg} alt="大图预览"/>
           </div>
         </div>
+      )}
+
+      {previewFile && (
+        <FilePreviewModal
+          filePath={previewFile}
+          sessionId={session?.id}
+          projectId={projectId}
+          onClose={() => setPreviewFile(null)}
+          onOpenInCode={onInspectFile}
+          onError={onError}
+        />
       )}
     </div>
     </ImageContext.Provider>

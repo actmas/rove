@@ -26,10 +26,10 @@ Rove runs a FastAPI control plane and React PWA on your workstation. Your reposi
 | Visible model quotas | Inspect Codex five-hour and weekly limits, Antigravity model quotas, and reset countdowns. Available fields depend on the engine response. |
 | Continue with another model | Change the model within a conversation and continue with the existing task history. |
 | Cross-engine handoff | Switch between Codex, Antigravity, and configured agents. Rove prepares textual context from conversation history, project conventions, and file changes for the receiving engine. |
-| Remote control of host tasks | View streamed output, code changes, terminal sessions, questions, and approvals through a browser or installed PWA. |
+| Remote control & file preview | View streamed output, code changes, terminal sessions, questions, approvals, and inline preview/download for project files (Markdown, PDF, media, source) through a browser or installed PWA. |
 | Persistent project memory | Store development conventions, architecture decisions, and build commands for later conversations. |
 | Parallel Git workspaces | Isolate concurrent changes with Git Worktrees, inspect diffs, and squash-merge completed work. |
-| Multiple notification surfaces | Configure Web Push and Feishu notifications, with dedicated e-ink approval and watch monitoring pages. |
+| Apple Watch & multi-surface approvals | Receive encrypted Web Push on iPhone (mirrored to Apple Watch), approve from the wrist via 1-step Watch Shortcuts (`POST /api/watch/approve`) or the native `RoveWatch` watchOS target, or use `/eink` and Feishu with atomic approval locking. |
 
 For example, use Codex to analyze a bug, switch to Antigravity to continue implementation, and return to Codex to review the changes. Rove keeps the conversation together and prepares context for engine transitions. Review and test the resulting code as part of your workflow.
 

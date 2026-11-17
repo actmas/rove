@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager, closing
 import hashlib
 import hmac
 import json
+import mimetypes
 import os
 from pathlib import Path
 import re
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import time
 from typing import Literal
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.gzip import GZipMiddleware
@@ -236,17 +238,18 @@ async def security(request: Request, call_next):
     else:
         cache_control = 'no-store'
     script_csp = "script-src 'self' 'unsafe-inline'"
-    response.headers.update({
-        'X-Content-Type-Options': 'nosniff',
-        'X-Frame-Options': 'DENY',
-        'Referrer-Policy': 'no-referrer',
-        'Cache-Control': cache_control,
-        'Content-Security-Policy': (
+    response.headers.setdefault('X-Content-Type-Options', 'nosniff')
+    response.headers.setdefault('X-Frame-Options', 'DENY')
+    response.headers.setdefault('Referrer-Policy', 'no-referrer')
+    response.headers.setdefault('Cache-Control', cache_control)
+    response.headers.setdefault(
+        'Content-Security-Policy',
+        (
             f"default-src 'self'; {script_csp}; worker-src 'self'; manifest-src 'self'; "
             "style-src 'self' 'unsafe-inline'; connect-src 'self' " + websocket_origins + "; "
             "img-src 'self' https: data: blob:; media-src 'self' data: blob:; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
         ),
-    })
+    )
     return response
 
 
@@ -1109,6 +1112,279 @@ async def get_media(path: str, session_id: str | None = None):
         headers['X-Content-Type-Options'] = 'nosniff'
 
     return FileResponse(target, media_type=media_types[ext], headers=headers)
+
+
+SENSITIVE_PATH_PARTS = {'.git', '.ssh', '.gnupg', '.aws'}
+FILE_LINE_SUFFIX_RE = re.compile(r':\d+(?::\d+)?$')
+EXTRA_MIME_TYPES = {
+    'md': 'text/markdown; charset=utf-8',
+    'markdown': 'text/markdown; charset=utf-8',
+    'txt': 'text/plain; charset=utf-8',
+    'log': 'text/plain; charset=utf-8',
+    'csv': 'text/csv; charset=utf-8',
+    'tsv': 'text/tab-separated-values; charset=utf-8',
+    'json': 'application/json; charset=utf-8',
+    'jsonl': 'application/x-ndjson; charset=utf-8',
+    'yaml': 'text/yaml; charset=utf-8',
+    'yml': 'text/yaml; charset=utf-8',
+    'toml': 'text/plain; charset=utf-8',
+    'ini': 'text/plain; charset=utf-8',
+    'conf': 'text/plain; charset=utf-8',
+    'py': 'text/x-python; charset=utf-8',
+    'js': 'application/javascript; charset=utf-8',
+    'mjs': 'application/javascript; charset=utf-8',
+    'jsx': 'text/javascript; charset=utf-8',
+    'ts': 'text/typescript; charset=utf-8',
+    'tsx': 'text/typescript; charset=utf-8',
+    'css': 'text/css; charset=utf-8',
+    'html': 'text/html; charset=utf-8',
+    'htm': 'text/html; charset=utf-8',
+    'xml': 'application/xml; charset=utf-8',
+    'svg': 'image/svg+xml',
+    'pdf': 'application/pdf',
+    'sh': 'text/x-shellscript; charset=utf-8',
+    'zsh': 'text/x-shellscript; charset=utf-8',
+    'sql': 'application/sql; charset=utf-8',
+    'rs': 'text/plain; charset=utf-8',
+    'go': 'text/plain; charset=utf-8',
+    'java': 'text/plain; charset=utf-8',
+    'c': 'text/plain; charset=utf-8',
+    'cpp': 'text/plain; charset=utf-8',
+    'h': 'text/plain; charset=utf-8',
+    'hpp': 'text/plain; charset=utf-8',
+    'swift': 'text/plain; charset=utf-8',
+    'webp': 'image/webp',
+    'png': 'image/png',
+    'jpg': 'image/jpeg',
+    'jpeg': 'image/jpeg',
+    'gif': 'image/gif',
+    'ico': 'image/x-icon',
+    'bmp': 'image/bmp',
+    'mp3': 'audio/mpeg',
+    'wav': 'audio/wav',
+    'm4a': 'audio/mp4',
+    'ogg': 'audio/ogg',
+    'mp4': 'video/mp4',
+    'webm': 'video/webm',
+    'mov': 'video/quicktime',
+    'zip': 'application/zip',
+    'gz': 'application/gzip',
+    'tar': 'application/x-tar',
+}
+TEXT_EXTS = {
+    'md', 'markdown', 'txt', 'log', 'csv', 'tsv', 'json', 'jsonl', 'yaml', 'yml',
+    'toml', 'ini', 'conf', 'py', 'js', 'mjs', 'cjs', 'jsx', 'ts', 'tsx', 'css',
+    'scss', 'less', 'html', 'htm', 'xml', 'svg', 'sh', 'zsh', 'bash', 'sql',
+    'rs', 'go', 'java', 'c', 'cpp', 'cc', 'h', 'hpp', 'swift', 'kt', 'rb', 'php',
+    'r', 'tex', 'bib', 'diff', 'patch',
+}
+
+
+def _allowed_file_roots(current_session=None) -> list[Path]:
+    home = Path.home().resolve()
+    allowed = [
+        (db.DATA / 'uploads').resolve(),
+        (home / '.gemini/antigravity').resolve(),
+        (home / '.codex').resolve(),
+        Path('/tmp').resolve(),
+    ]
+    for r in db.config().get('allowed_roots', []):
+        with contextlib.suppress(OSError):
+            allowed.append(Path(r).resolve())
+    for p in db.query('SELECT path FROM projects'):
+        with contextlib.suppress(OSError):
+            allowed.append(Path(p['path']).resolve())
+    if current_session:
+        for key in ('worktree_path', 'cwd'):
+            extra_path = current_session.get(key)
+            if extra_path:
+                with contextlib.suppress(OSError):
+                    allowed.append(Path(extra_path).resolve())
+    return allowed
+
+
+def _is_sensitive_relpath(target: Path, matched_root: Path) -> bool:
+    try:
+        rel_parts = target.relative_to(matched_root).parts
+    except ValueError:
+        return True
+    for part in rel_parts:
+        lower = part.lower()
+        if lower in SENSITIVE_PATH_PARTS or lower.startswith('.env'):
+            return True
+    return False
+
+
+def _resolve_allowed_file(
+    path: str,
+    session_id: str | None = None,
+    project_id: str | None = None,
+) -> tuple[Path, Path | None]:
+    clean = (path or '').strip()
+    if clean.startswith('file://localhost/'):
+        clean = '/' + clean[len('file://localhost/'):]
+    elif clean.startswith('file://'):
+        clean = clean[7:]
+    if clean.startswith('sandbox:'):
+        clean = clean[len('sandbox:'):]
+    if not clean:
+        raise HTTPException(400, '缺少文件路径')
+
+    current_session = session(session_id) if session_id else None
+    current_project = None
+    if current_session:
+        current_project = db.one('SELECT * FROM projects WHERE id=?', (current_session['project_id'],))
+    elif project_id:
+        current_project = project(project_id)
+
+    base_candidates: list[Path] = []
+    if current_session and current_session.get('cwd'):
+        with contextlib.suppress(OSError):
+            base_candidates.append(Path(current_session['cwd']))
+    if current_project:
+        with contextlib.suppress(OSError):
+            base_candidates.append(_project_base(current_project, session_id))
+            base_candidates.append(Path(current_project['path']))
+
+    def _expand(raw_str: str) -> Path:
+        cand = Path(raw_str).expanduser()
+        if not cand.is_absolute() and base_candidates:
+            for base in base_candidates:
+                joined = (base / cand)
+                with contextlib.suppress(OSError):
+                    if joined.resolve().is_file():
+                        return joined
+            return base_candidates[0] / cand
+        return cand
+
+    candidate = _expand(clean)
+    if not candidate.exists() and FILE_LINE_SUFFIX_RE.search(clean):
+        stripped = FILE_LINE_SUFFIX_RE.sub('', clean)
+        alt = _expand(stripped)
+        if alt.exists():
+            candidate = alt
+
+    target = candidate.resolve()
+    allowed = _allowed_file_roots(current_session)
+    matched_root = next((root for root in allowed if target.is_relative_to(root)), None)
+    if matched_root is None:
+        raise HTTPException(403, '无权访问此路径的文件')
+    if _is_sensitive_relpath(target, matched_root):
+        raise HTTPException(403, '出于安全原因，禁止访问敏感配置文件')
+    if not target.is_file():
+        raise HTTPException(404, '文件不存在')
+
+    project_base = _project_base(current_project, session_id) if current_project else None
+    return target, project_base
+
+
+def _guess_file_type(target: Path) -> tuple[str, str]:
+    ext = target.suffix.lower().lstrip('.')
+    media_type = EXTRA_MIME_TYPES.get(ext)
+    if not media_type:
+        guessed, _ = mimetypes.guess_type(target.name)
+        if guessed:
+            media_type = f'{guessed}; charset=utf-8' if guessed.startswith('text/') else guessed
+        else:
+            media_type = 'application/octet-stream'
+
+    if ext in {'png', 'jpg', 'jpeg', 'webp', 'gif', 'svg', 'bmp', 'ico'}:
+        kind = 'image'
+    elif ext == 'pdf':
+        kind = 'pdf'
+    elif ext in {'md', 'markdown'}:
+        kind = 'markdown'
+    elif ext in {'html', 'htm'}:
+        kind = 'html'
+    elif ext in {'mp3', 'wav', 'm4a', 'ogg'} or media_type.startswith('audio/'):
+        kind = 'audio'
+    elif ext in {'mp4', 'webm', 'mov'} or media_type.startswith('video/'):
+        kind = 'video'
+    elif ext in TEXT_EXTS or media_type.startswith('text/') or media_type.startswith('application/json'):
+        kind = 'text'
+    else:
+        kind = 'binary'
+    return media_type, kind
+
+
+def _build_download_headers(filename: str) -> dict[str, str]:
+    ascii_fallback = ''.join(c if 32 <= ord(c) < 127 and c not in '"\\;' else '_' for c in filename) or 'download'
+    utf8_name = quote(filename, safe='')
+    return {
+        'Content-Disposition': f'attachment; filename="{ascii_fallback}"; filename*=UTF-8\'\'{utf8_name}',
+        'X-Content-Type-Options': 'nosniff',
+    }
+
+
+def _read_file_meta_sync(target: Path, project_base: Path | None) -> dict:
+    stat = target.stat()
+    media_type, kind = _guess_file_type(target)
+    rel_path = None
+    if project_base and target.is_relative_to(project_base):
+        rel_path = str(target.relative_to(project_base))
+
+    preview_text = None
+    truncated = False
+    max_preview_bytes = 512 * 1024
+    if kind in {'text', 'markdown', 'html'} or (kind == 'image' and target.suffix.lower() == '.svg'):
+        with target.open('rb') as fp:
+            raw = fp.read(max_preview_bytes + 1)
+        if b'\x00' not in raw:
+            if len(raw) > max_preview_bytes:
+                raw = raw[:max_preview_bytes]
+                truncated = True
+            preview_text = raw.decode('utf-8', errors='replace')
+    elif kind == 'binary' and stat.st_size <= 64 * 1024:
+        raw = target.read_bytes()
+        if b'\x00' not in raw:
+            kind = 'text'
+            preview_text = raw.decode('utf-8', errors='replace')
+
+    return {
+        'name': target.name,
+        'path': str(target),
+        'relative_path': rel_path,
+        'size': stat.st_size,
+        'mime': media_type,
+        'kind': kind,
+        'preview_text': preview_text,
+        'truncated': truncated,
+    }
+
+
+@app.get('/api/files/meta')
+async def get_file_meta(path: str, session_id: str | None = None, project_id: str | None = None):
+    target, project_base = _resolve_allowed_file(path, session_id=session_id, project_id=project_id)
+    return await asyncio.to_thread(_read_file_meta_sync, target, project_base)
+
+
+@app.get('/api/files')
+async def get_file_content(
+    path: str,
+    session_id: str | None = None,
+    project_id: str | None = None,
+    download: bool = False,
+):
+    target, _ = _resolve_allowed_file(path, session_id=session_id, project_id=project_id)
+    media_type, _ = _guess_file_type(target)
+    if download:
+        headers = _build_download_headers(target.name)
+        return FileResponse(target, media_type=media_type, headers=headers)
+
+    headers = {
+        'X-Frame-Options': 'SAMEORIGIN',
+        'X-Content-Type-Options': 'nosniff',
+    }
+    ext = target.suffix.lower().lstrip('.')
+    if ext in {'svg', 'html', 'htm', 'xhtml', 'xml'}:
+        headers['Content-Security-Policy'] = (
+            "default-src 'none'; style-src 'unsafe-inline'; img-src data: blob:; frame-ancestors 'self'; sandbox"
+        )
+    elif ext == 'pdf':
+        headers['Content-Security-Policy'] = (
+            "default-src 'self'; object-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'self'"
+        )
+    return FileResponse(target, media_type=media_type, headers=headers)
 
 
 @app.post('/api/sessions/{ident}/stop')
@@ -2276,7 +2552,7 @@ async def read_file(ident: str, path: str, session_id: str | None = None):
 
 
 def git_run(path, *args):
-    result = subprocess.run(['git', '-C', path, *args], capture_output=True, timeout=15)
+    result = subprocess.run(['git', '-c', 'core.quotepath=false', '-C', path, *args], capture_output=True, timeout=15)
     return result.returncode, result.stdout[:2 * 1024 * 1024].decode(errors='replace')
 
 

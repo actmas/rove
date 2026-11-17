@@ -1,9 +1,9 @@
 import {useCallback, useEffect, useMemo, useState} from 'react';
 import {
   Folder, FileCode, ChevronRight, ArrowLeft, RefreshCw, GitBranch,
-  Search, Copy, Check, AtSign, FileDiff,
+  Search, Copy, Check, AtSign, FileDiff, Download, ExternalLink, FileArchive,
 } from 'lucide-react';
-import {api, parseUnifiedDiff} from './api';
+import {api, parseUnifiedDiff, fileUrl, downloadFile, fileMetaApiPath, formatFileSize} from './api';
 
 function FileDiffCard({item, onOpenFile, onMentionFile}) {
   return (
@@ -100,17 +100,29 @@ export default function CodePane({project, sessionId, onError, initialFile, onCo
 
   const openFileByPath = useCallback(async (filePath) => {
     if (!project || !filePath) return;
+    const parent = filePath.includes('/') ? filePath.split('/').slice(0, -1).join('/') : '';
     try {
       const data = await api(`projects/${project.id}/file?path=${encodeURIComponent(filePath)}${sessionQuery}`);
-      const parent = filePath.includes('/') ? filePath.split('/').slice(0, -1).join('/') : '';
       setPath(parent);
       setFile(data);
       setMaxDisplayLines(600);
       setMode('files');
-    } catch (e) {
-      onError(e.message);
+    } catch {
+      try {
+        const meta = await api(fileMetaApiPath(filePath, {sessionId, projectId: project.id}));
+        setPath(parent);
+        setFile({
+          path: meta.relative_path || filePath,
+          text: meta.preview_text,
+          meta,
+        });
+        setMaxDisplayLines(600);
+        setMode('files');
+      } catch (metaErr) {
+        onError(metaErr.message);
+      }
     }
-  }, [project, sessionQuery, onError]);
+  }, [project, sessionId, sessionQuery, onError]);
 
   useEffect(() => {
     if (initialFile && project) {
@@ -216,7 +228,8 @@ export default function CodePane({project, sessionId, onError, initialFile, onCo
                   <div className="status-items">
                     {statusLines.map((line, i) => {
                       const code = line.slice(0, 2).trim() || 'M';
-                      const rel = line.slice(3).trim().replace(/^"|"$/g, '');
+                      const rawRel = line.slice(3).trim().replace(/^"|"$/g, '');
+                      const rel = rawRel.includes(' -> ') ? rawRel.split(' -> ').pop().trim() : rawRel;
                       const isDir = rel.endsWith('/');
                       const canOpen = !code.includes('D') && !isDir;
                       return (
@@ -224,7 +237,16 @@ export default function CodePane({project, sessionId, onError, initialFile, onCo
                           type="button"
                           key={i}
                           className="status-chip"
-                          onClick={() => isDir ? setMode('files') : (canOpen && openFileByPath(rel))}
+                          onClick={() => {
+                            if (isDir) {
+                              const cleanDir = rel.replace(/\/+$/, '');
+                              setPath(cleanDir === '.' ? '' : cleanDir);
+                              setFile(null);
+                              setMode('files');
+                            } else if (canOpen) {
+                              openFileByPath(rel);
+                            }
+                          }}
                           title={isDir ? '切换至项目文件浏览目录' : (canOpen ? `点击查看 ${rel}` : rel)}
                         >
                           <span className={`git-code code-${code[0]}`}>{code}</span>
@@ -345,12 +367,88 @@ export default function CodePane({project, sessionId, onError, initialFile, onCo
                         <AtSign size={13}/>引用到对话
                       </button>
                     )}
-                    <button type="button" onClick={copyContent}>
-                      {copied ? <Check size={13}/> : <Copy size={13}/>}
-                      <span>{copied ? '已复制' : '复制'}</span>
+                    <button
+                      type="button"
+                      className="file-action-link"
+                      title={`下载 ${file.path}`}
+                      onClick={() => downloadFile(file.meta?.path || file.path, {
+                        sessionId,
+                        projectId: project.id,
+                        filename: file.meta?.name,
+                        onError,
+                      })}
+                    >
+                      <Download size={13}/><span>下载</span>
                     </button>
+                    {file.text != null && (
+                      <button type="button" onClick={copyContent}>
+                        {copied ? <Check size={13}/> : <Copy size={13}/>}
+                        <span>{copied ? '已复制' : '复制'}</span>
+                      </button>
+                    )}
                   </div>
                 </div>
+                {file.meta && file.text == null ? (
+                  <div className="file-binary-preview">
+                    {file.meta.kind === 'image' ? (
+                      <div className="file-preview-media">
+                        <img
+                          src={fileUrl(file.path, {sessionId, projectId: project.id})}
+                          alt={file.meta.name}
+                        />
+                      </div>
+                    ) : file.meta.kind === 'audio' ? (
+                      <div className="file-preview-media">
+                        <audio
+                          controls
+                          src={fileUrl(file.path, {sessionId, projectId: project.id})}
+                        />
+                      </div>
+                    ) : file.meta.kind === 'video' ? (
+                      <div className="file-preview-media">
+                        <video
+                          controls
+                          src={fileUrl(file.path, {sessionId, projectId: project.id})}
+                        />
+                      </div>
+                    ) : file.meta.kind === 'pdf' ? (
+                      <iframe
+                        src={fileUrl(file.path, {sessionId, projectId: project.id})}
+                        title={file.meta.name}
+                        className="file-preview-iframe"
+                      />
+                    ) : (
+                      <div className="file-preview-state">
+                        <FileArchive size={28}/>
+                        <p>
+                          {file.meta.name}（{formatFileSize(file.meta.size)}）暂不支持源码内嵌预览。
+                        </p>
+                        <div className="button-row">
+                          <button
+                            type="button"
+                            className="file-preview-btn primary"
+                            onClick={() => downloadFile(file.meta?.path || file.path, {
+                              sessionId,
+                              projectId: project.id,
+                              filename: file.meta.name,
+                              onError,
+                            })}
+                          >
+                            <Download size={14}/><span>下载文件</span>
+                          </button>
+                          <a
+                            href={fileUrl(file.path, {sessionId, projectId: project.id})}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="file-preview-btn"
+                          >
+                            <ExternalLink size={14}/><span>新标签页打开</span>
+                          </a>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
                 <div className="code-table-wrap">
                   <table className="code-table">
                     <tbody>
@@ -375,6 +473,7 @@ export default function CodePane({project, sessionId, onError, initialFile, onCo
                     </div>
                   )}
                 </div>
+                )}
               </>
             ) : (
               <div className="empty-note">从左侧选择或搜索文件查看源码。</div>

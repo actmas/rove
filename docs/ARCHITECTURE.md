@@ -19,7 +19,7 @@
 
 ### 4. 多引擎共生与多触点协同 (Multi-Agent Symbiosis & Multi-Surface Presence)
 - **横向（多引擎）**：在同一对话流中支持 OpenAI **Codex**、Google **Antigravity**、**Claude Code**、**Gemini CLI**、**Aider**、**OpenCode** 及任意 **OpenAI 兼容 API** 无缝切换接力。
-- **纵向（多触点）**：同一套后端状态机同时驱动 **桌面/移动响应式 Web (PWA)**、**iOS 伴侣应用**、**Apple Watch 实时监控页 (`/watch/live`)**、**Kindle/墨水屏高对比审批台 (`/eink`)**、**飞书双向机器人 (`feishu_relay.py`)** 以及 **系统级锁屏 Web Push (`webpush.py`)**。
+- **纵向（多触点）**：同一套后端状态机同时驱动 **桌面/移动响应式 Web (PWA)**、**iOS & watchOS 原生伴侣应用 (`ios-companion/Rove`, `RoveWatch`)**、**Apple Watch 实时监控与快速审批 (`/watch/live` & 1 步快捷指令 API)**、**Kindle/墨水屏高对比审批台 (`/eink`)**、**飞书双向机器人 (`feishu_relay.py`)** 以及 **系统级锁屏 Web Push (`webpush.py`)**。
 
 ---
 
@@ -30,8 +30,8 @@ flowchart TB
     subgraph Surfaces["多端协同触点 (Multi-Surface Clients)"]
         PWA["React 19 桌面/移动 PWA<br/>(frontend/src/*)"]
         EInk["墨水屏极简审批终端<br/>(/eink · eink_live.js)"]
-        Watch["智能手表实时监控<br/>(/watch/live · watch_live.js)"]
-        iOS["iOS Companion App<br/>(ios-companion/)"]
+        Watch["Apple Watch 审批与监控<br/>(/watch/live · 快捷指令 · RoveWatch)"]
+        iOS["iOS & watchOS Companion<br/>(ios-companion/)"]
         Feishu["飞书双向回调机器人<br/>(feishu_relay.py)"]
         Push["RFC 8291/8292 锁屏推送<br/>(webpush.py · sw.js)"]
     end
