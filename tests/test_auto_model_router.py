@@ -283,6 +283,69 @@ class AutoModelRouterTests(unittest.TestCase):
         finally:
             server.spawn = orig_spawn
 
+    def test_5_hydrogen_priority_and_codex_conservation(self):
+        now = 1_800_000_000.0
+        # Inject realistic Antigravity catalog containing Hydrogen + Argon + Flash + Claude
+        engines.save_models('antigravity', [
+            {'id': 'gemini-4-argon-high', 'name': 'Gemini 4 Argon (High)', 'defaultEffort': 'high', 'efforts': ['low', 'medium', 'high', 'xhigh', 'max'], 'isDefault': True, 'supportsImage': True},
+            {'id': 'gemini-4-argon-low', 'name': 'Gemini 4 Argon (Low)', 'defaultEffort': 'low', 'efforts': ['low', 'medium', 'high', 'xhigh', 'max'], 'supportsImage': True},
+            {'id': 'gemini-4-hydrogen-low', 'name': 'Gemini 4 Hydrogen (Low)', 'defaultEffort': 'low', 'efforts': ['low', 'medium', 'high', 'xhigh', 'max'], 'supportsImage': True},
+            {'id': 'gemini-4-hydrogen-medium', 'name': 'Gemini 4 Hydrogen (Medium)', 'defaultEffort': 'medium', 'efforts': ['low', 'medium', 'high', 'xhigh', 'max'], 'supportsImage': True},
+            {'id': 'gemini-4-hydrogen-high', 'name': 'Gemini 4 Hydrogen (High)', 'defaultEffort': 'high', 'efforts': ['low', 'medium', 'high', 'xhigh', 'max'], 'supportsImage': True},
+            {'id': 'gemini-3.8-flash-low', 'name': 'Gemini 3.8 Flash (Low)', 'defaultEffort': 'low', 'efforts': ['low', 'medium', 'high', 'xhigh', 'max'], 'supportsImage': True},
+        ])
+        q_snap = {
+            'codex': {
+                'status': 'ready',
+                'primary': {'remaining_percent': 100, 'resets_at': int(now + 5 * 3600)},
+                'secondary': {'remaining_percent': 70, 'resets_at': int(now + 110 * 3600)},
+            },
+            'antigravity': {
+                'status': 'ready',
+                'gemini_4_argon': {
+                    'weekly': {'remaining_percent': 95, 'resets_at': int(now + 160 * 3600)},
+                    'rolling_5h': {'remaining_percent': 65, 'resets_at': int(now + 3 * 3600)},
+                },
+                'general_flash': {
+                    'weekly': {'remaining_percent': 90, 'resets_at': int(now + 160 * 3600)},
+                    'rolling_5h': {'remaining_percent': 65, 'resets_at': int(now + 3 * 3600)},
+                },
+                'by_model_id': {
+                    'gemini-4-hydrogen-low': {'remaining_percent': 65, 'pool_tag': '5小时极速池', 'resets_at': int(now + 3 * 3600)},
+                    'gemini-4-hydrogen-medium': {'remaining_percent': 65, 'pool_tag': '5小时极速池', 'resets_at': int(now + 3 * 3600)},
+                },
+            },
+        }
+        # 1. Simple prompt MUST pick Hydrogen Low (never Argon / Codex!)
+        simple_res = model_router.auto_select_model_and_effort(
+            prompt='你好，帮我看一下 git status',
+            requested_engine='auto', requested_model='auto', requested_effort='auto',
+            quotas_snapshot=q_snap, installed_engines=['codex', 'antigravity'], now=now,
+        )
+        self.assertEqual(simple_res['engine'], 'antigravity')
+        self.assertEqual(simple_res['model'], 'gemini-4-hydrogen-low')
+        self.assertEqual(simple_res['effort'], 'low')
+
+        # 2. Standard prompt picks Hydrogen Medium and conserves both Argon 7d and Codex 7d
+        std_res = model_router.auto_select_model_and_effort(
+            prompt='给 server.py 添加一个导出接口并写单元测试',
+            requested_engine='auto', requested_model='auto', requested_effort='auto',
+            quotas_snapshot=q_snap, installed_engines=['codex', 'antigravity'], now=now,
+        )
+        self.assertEqual(std_res['engine'], 'antigravity')
+        self.assertEqual(std_res['model'], 'gemini-4-hydrogen-medium')
+        self.assertEqual(std_res['effort'], 'medium')
+
+        # 3. Complex architecture task considers Argon High (while still conserving Codex when not expiring)
+        cmp_res = model_router.auto_select_model_and_effort(
+            prompt='全面审计重构 worker.py 多进程并发调度架构与死锁问题',
+            requested_engine='auto', requested_model='auto', requested_effort='auto',
+            quotas_snapshot=q_snap, installed_engines=['codex', 'antigravity'], now=now,
+        )
+        self.assertEqual(cmp_res['engine'], 'antigravity')
+        self.assertEqual(cmp_res['model'], 'gemini-4-argon-high')
+        self.assertIn(cmp_res['effort'], ('high', 'xhigh'))
+
 
 if __name__ == '__main__':
     unittest.main()

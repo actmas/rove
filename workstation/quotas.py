@@ -628,7 +628,7 @@ async def get_antigravity_quotas(force: bool = False) -> dict:
 
     if general_flash:
         for mid, entry in by_model_id.items():
-            if "flash" in mid.lower() or "pro" in mid.lower():
+            if any(k in mid.lower() for k in ("flash", "hydrogen", "pro")):
                 entry["weekly"] = general_flash.get("weekly")
                 entry["rolling_5h"] = general_flash.get("rolling_5h")
 

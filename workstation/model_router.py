@@ -126,11 +126,17 @@ def classify_task(
 
 def _classify_model_tier(engine: str, model_spec: Dict[str, Any]) -> str:
     mid = str(model_spec.get('id') or model_spec.get('model') or '').lower()
-    if any(tok in mid for tok in ('flash', 'luna', 'mini', 'nano', 'haiku', 'light')):
-        return 'fast'
-    if any(tok in mid for tok in ('astra', 'argon', 'opus', 'gpt-5.4', 'o3', 'o1')):
+    # Check flagship families before general/fast tokens (and use token boundaries so 'gemini' != 'mini')
+    if any(tok in mid for tok in ('argon', 'astra', 'opus', 'gpt-5.4')) or re.search(r'(?:^|[-_.])(o1|o3)(?:$|[-_.])', mid):
         return 'flagship'
-    if 'sonnet' in mid or 'sol' in mid or 'terra' in mid or 'pro' in mid:
+    if 'hydrogen' in mid:
+        # Hydrogen (Low) handles trivial/quick prompts; Hydrogen (Medium/High) serves everyday standard coding
+        if mid.endswith('-low') or model_spec.get('defaultEffort') == 'low':
+            return 'fast'
+        return 'balanced'
+    if any(tok in mid for tok in ('flash', 'luna')) or re.search(r'(?:^|[-_.])(mini|nano|haiku|light)(?:$|[-_.])', mid):
+        return 'fast'
+    if any(tok in mid for tok in ('sonnet', 'sol', 'terra', 'gpt-oss')) or re.search(r'(?:^|[-_.])pro(?:$|[-_.])', mid):
         return 'balanced'
     if model_spec.get('defaultEffort') in ('high', 'xhigh', 'max', 'ultra'):
         return 'flagship'
@@ -155,18 +161,28 @@ def _pick_agy_pool(agy: Dict[str, Any], model_id: str) -> Dict[str, Any]:
     mid = (model_id or '').strip()
     mid_l = mid.lower()
     by_mid = agy.get('by_model_id') or {}
-    if mid and isinstance(by_mid.get(mid), dict):
-        return by_mid[mid]
+    fallback_card: Optional[Dict[str, Any]] = None
     if 'argon' in mid_l and isinstance(agy.get('gemini_4_argon'), dict):
-        return agy['gemini_4_argon']
-    if ('claude' in mid_l or 'gpt' in mid_l) and isinstance(agy.get('claude_gpt'), dict):
-        return agy['claude_gpt']
-    if ('flash' in mid_l or 'pro' in mid_l) and isinstance(agy.get('general_flash'), dict):
-        return agy['general_flash']
+        fallback_card = agy['gemini_4_argon']
+    elif ('claude' in mid_l or 'gpt' in mid_l) and isinstance(agy.get('claude_gpt'), dict):
+        fallback_card = agy['claude_gpt']
+    elif any(k in mid_l for k in ('hydrogen', 'flash', 'pro')) and isinstance(agy.get('general_flash'), dict):
+        fallback_card = agy['general_flash']
+
+    if mid and isinstance(by_mid.get(mid), dict):
+        entry = dict(by_mid[mid])
+        if fallback_card:
+            if not entry.get('weekly') and fallback_card.get('weekly'):
+                entry['weekly'] = fallback_card['weekly']
+            if not entry.get('rolling_5h') and fallback_card.get('rolling_5h'):
+                entry['rolling_5h'] = fallback_card['rolling_5h']
+        return entry
+    if fallback_card:
+        return fallback_card
     for item in (agy.get('models') or []):
         if isinstance(item, dict) and item.get('model_id') == mid:
             return item
-    return agy.get('gemini_4_argon') or agy.get('general_flash') or agy.get('claude_gpt') or {}
+    return agy.get('general_flash') or agy.get('gemini_4_argon') or agy.get('claude_gpt') or {}
 
 
 def _format_hours_brief(secs: float) -> str:
@@ -375,8 +391,8 @@ def evaluate_quota_profile(
         and weekly_secs > 0
         and rolling_healthy
         and (
-            (w_hours_eff <= 48.0 and weekly_rem >= 18 and surplus >= 10.0)
-            or (w_hours_eff <= 24.0 and weekly_rem >= 12)
+            (w_hours_eff <= 42.0 and weekly_rem >= 20 and surplus >= 15.0)
+            or (w_hours_eff <= 24.0 and weekly_rem >= 15)
         )
     ):
         budget_state = 'expiring_abundant'
@@ -483,8 +499,13 @@ def _adjust_tier_and_effort(
     """Compute effective (desired_tier, chosen_effort) given task + quota budget state."""
     desired_tier = task_info['desired_tier']
     base_effort = task_info['base_effort']
+    complexity = task_info['complexity']
 
-    if budget_state == 'expiring_abundant':
+    if complexity == 'simple':
+        # Never waste heavy flagship thinking on simple/quick prompts
+        desired_tier = 'fast'
+        target_effort = 'low'
+    elif budget_state == 'expiring_abundant':
         # 7-day quota about to expire unused: upgrade standard -> flagship, bump effort +1 tier
         if desired_tier == 'standard':
             desired_tier = 'flagship'
@@ -594,6 +615,7 @@ def auto_select_model_and_effort(
             )
             model_tier = _classify_model_tier(eng, m_spec)
 
+            mid_l = mid.lower()
             score = 0.0
             if not q_prof['engine_ready']:
                 score -= 500.0
@@ -603,14 +625,34 @@ def auto_select_model_and_effort(
             score += _tier_fit_score(model_tier, effective_tier)
             score += q_prof['quota_score']
 
+            # Conserve Codex quota during cross-engine auto routing unless Codex 7-day quota is expiring soon
+            if auto_engine and len(candidate_engines) > 1 and eng == 'codex' and q_prof['budget_state'] != 'expiring_abundant':
+                score -= 14.0
+
+            # Task-matched family preferences:
+            # - Simple & standard tasks prefer fast 5-hour Hydrogen pool to preserve 7-day Argon/Codex
+            # - Simple tasks strongly avoid wasting flagship models
+            # - Complex tasks prefer Argon (unless another 7-day flagship pool is expiring soon)
+            if task_info['complexity'] == 'simple':
+                if 'hydrogen' in mid_l:
+                    score += 10.0
+                elif model_tier == 'flagship':
+                    score -= 15.0
+            elif task_info['complexity'] == 'standard':
+                if 'hydrogen' in mid_l and q_prof['budget_state'] != 'expiring_abundant':
+                    score += 8.0
+            elif task_info['complexity'] == 'complex':
+                if 'argon' in mid_l and q_prof['budget_state'] != 'scarce':
+                    score += 5.0
+
             # In catalogs with effort-suffixed models (e.g. gemini-4-argon-high/medium/low), align variant to chosen effort
             if m_spec.get('defaultEffort') == chosen_effort:
                 score += 8.0
             elif chosen_effort == 'xhigh' and m_spec.get('defaultEffort') == 'high':
                 score += 6.0
 
-            if preferred_engine and eng == preferred_engine:
-                score += 4.0
+            if preferred_engine and eng == preferred_engine and (not auto_engine or eng != 'codex' or q_prof['budget_state'] == 'expiring_abundant'):
+                score += 2.0
             if m_spec.get('isDefault'):
                 score += 1.5
             # Tiny deterministic preference for earlier catalog items on complete tie
