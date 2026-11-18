@@ -87,6 +87,23 @@ class SlashAndCompactTests(unittest.TestCase):
         ev = db.one("SELECT payload FROM events WHERE session_id=? AND kind='notice' ORDER BY id DESC LIMIT 1", (sid,))
         self.assertIn('/compact', ev['payload'])
 
+    def test_3_usage_analytics_aggregates_jobs_by_engine_model_project(self):
+        s_res = self.client.post('/api/sessions', json={'project_id': 'proj1', 'engine': 'antigravity'}, headers=self.headers)
+        sid = s_res.json()['id']
+        import time
+        now = time.time()
+        db.execute(
+            "INSERT INTO jobs(id,session_id,request_id,prompt,status,started,model,effort,mode,fast,images,engine) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            ('j_ana_1', sid, 'req_ana_1', 'hello', 'completed', now, 'gemini-4-hydrogen-low', 'low', 'standard', 0, '[]', 'antigravity'),
+        )
+        res = self.client.get('/api/analytics/usage?days=7', headers=self.headers)
+        self.assertEqual(res.status_code, 200, res.text)
+        data = res.json()
+        self.assertGreaterEqual(data['totals']['total_jobs'], 1)
+        self.assertTrue(any(r['model'] == 'gemini-4-hydrogen-low' for r in data['by_model']))
+        self.assertTrue(any(r['project_name'] == 'Demo' for r in data['by_project']))
+
 
 if __name__ == '__main__':
     unittest.main()

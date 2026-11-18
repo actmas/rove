@@ -381,6 +381,49 @@ async def list_preview_ports():
     return {'ports': active_ports}
 
 
+_PREVIEW_PROBE_SCRIPT = """<script data-rove-probe>
+(function(){
+  if(window.__roveProbe)return;window.__roveProbe=true;
+  var active=false,box=null;
+  function send(d){try{window.parent.postMessage(d,'*')}catch(e){}}
+  var oe=console.error;console.error=function(){
+    try{send({type:'rove-preview-error',message:Array.from(arguments).map(String).join(' ').slice(0,500)})}catch(e){}
+    return oe.apply(console,arguments);
+  };
+  window.addEventListener('error',function(e){send({type:'rove-preview-error',message:(e.message||'Error')+' @ '+(e.filename||'')+':'+(e.lineno||'')})});
+  window.addEventListener('unhandledrejection',function(e){send({type:'rove-preview-error',message:'UnhandledRejection: '+String(e.reason||'')})});
+  function sel(el){
+    if(!el||el.nodeType!==1)return '';
+    var s=el.tagName.toLowerCase();
+    if(el.id)s+='#'+el.id;
+    else if(el.className&&typeof el.className==='string'){
+      var c=el.className.trim().split(/\\s+/).slice(0,3).join('.');
+      if(c)s+='.'+c;
+    }
+    return s;
+  }
+  window.addEventListener('message',function(ev){
+    if(ev.data&&ev.data.type==='rove-inspect-toggle'){
+      active=!!ev.data.active;
+      if(!active&&box){box.remove();box=null;}
+    }
+  });
+  document.addEventListener('mouseover',function(e){
+    if(!active)return;
+    var r=e.target.getBoundingClientRect();
+    if(!box){box=document.createElement('div');box.style.cssText='position:fixed;pointer-events:none;border:2px solid #3b82f6;background:rgba(59,130,246,0.12);z-index:2147483647;border-radius:3px;';document.body.appendChild(box);}
+    box.style.left=r.left+'px';box.style.top=r.top+'px';box.style.width=r.width+'px';box.style.height=r.height+'px';
+  },true);
+  document.addEventListener('click',function(e){
+    if(!active)return;
+    e.preventDefault();e.stopPropagation();
+    var el=e.target;
+    send({type:'rove-preview-pick',tag:(el.tagName||'').toLowerCase(),id:el.id||'',className:typeof el.className==='string'?el.className:'',text:(el.innerText||'').trim().slice(0,120),selector:sel(el)});
+  },true);
+})();
+</script>"""
+
+
 @app.api_route('/api/preview/{port}', methods=['GET', 'HEAD'])
 @app.api_route('/api/preview/{port}/{subpath:path}', methods=['GET', 'HEAD'])
 async def proxy_local_preview(port: int, request: Request, subpath: str = ''):
@@ -401,7 +444,16 @@ async def proxy_local_preview(port: int, request: Request, subpath: str = ''):
         if kl in ('content-encoding', 'content-length', 'transfer-encoding', 'x-frame-options', 'content-security-policy', 'set-cookie'):
             continue
         headers[k] = v
-    return Response(content=upstream.content, status_code=upstream.status_code, headers=headers)
+    body = upstream.content
+    ctype = (upstream.headers.get('content-type') or '').lower()
+    if request.method == 'GET' and 'text/html' in ctype:
+        html_text = body.decode('utf-8', errors='replace')
+        if '</body>' in html_text:
+            html_text = html_text.replace('</body>', _PREVIEW_PROBE_SCRIPT + '</body>', 1)
+        else:
+            html_text += _PREVIEW_PROBE_SCRIPT
+        body = html_text.encode('utf-8')
+    return Response(content=body, status_code=upstream.status_code, headers=headers)
 
 
 def project(ident):
@@ -595,6 +647,45 @@ async def fetch_quotas(force: bool = False):
 @app.post('/api/quotas/refresh')
 async def refresh_quotas():
     return await quotas.get_all_quotas(force=True)
+
+
+@app.get('/api/analytics/usage')
+async def usage_analytics(days: int = 7):
+    days = max(1, min(90, int(days)))
+    cutoff = time.time() - days * 86400
+    by_engine = db.query(
+        "SELECT COALESCE(NULLIF(engine, ''), 'codex') AS engine, COUNT(*) AS total, "
+        "SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed "
+        "FROM jobs WHERE COALESCE(started, 0) >= ? GROUP BY engine ORDER BY total DESC",
+        (cutoff,),
+    )
+    by_model = db.query(
+        "SELECT COALESCE(NULLIF(model, ''), 'default') AS model, COALESCE(NULLIF(engine, ''), 'codex') AS engine, "
+        "COUNT(*) AS total FROM jobs WHERE COALESCE(started, 0) >= ? "
+        "GROUP BY model, engine ORDER BY total DESC LIMIT 12",
+        (cutoff,),
+    )
+    by_project = db.query(
+        "SELECT p.name AS project_name, COUNT(j.id) AS total, "
+        "COALESCE(SUM(s.tokens_used), 0) AS tokens_used "
+        "FROM jobs j JOIN sessions s ON s.id=j.session_id JOIN projects p ON p.id=s.project_id "
+        "WHERE COALESCE(j.started, 0) >= ? GROUP BY p.id ORDER BY total DESC LIMIT 10",
+        (cutoff,),
+    )
+    totals = db.one(
+        "SELECT COUNT(*) AS total_jobs, "
+        "SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed_jobs, "
+        "SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed_jobs "
+        "FROM jobs WHERE COALESCE(started, 0) >= ?",
+        (cutoff,),
+    ) or {'total_jobs': 0, 'completed_jobs': 0, 'failed_jobs': 0}
+    return {
+        'days': days,
+        'totals': totals,
+        'by_engine': by_engine,
+        'by_model': by_model,
+        'by_project': by_project,
+    }
 
 
 engine_check_lock = asyncio.Lock()

@@ -1,21 +1,21 @@
 /* Walking Workstation Service Worker: Instant App-Shell Boot, WebAPK, Offline Fallback & Web Push */
-const CACHE_NAME = 'walking-workstation-shell-aaf28c89cb';
+const CACHE_NAME = 'walking-workstation-shell-b158fb1385';
 const PRECACHE_ASSETS = [
   "/",
   "/manifest.webmanifest",
   "/rove-favicon.svg",
   "/rove-apple-touch.png",
   "/rove-192.png",
-  "/watch/assets/InstallGuideModal-BfDk20PH.js",
-  "/watch/assets/PermissionModal-CHVzzQXg.js",
-  "/watch/assets/PreviewPane-DxoMxQN8.js",
-  "/watch/assets/ProjectMemoriesModal-DLxNetA3.js",
-  "/watch/assets/QuotaModal-BL26rPC3.js",
-  "/watch/assets/SettingsPanel-DRj5w-i4.js",
-  "/watch/assets/WorktreeModal-BRJDrsle.js",
-  "/watch/assets/index-BWXCmnJP.js",
-  "/watch/assets/index-GFXtNtt8.css",
-  "/watch/assets/vendor-icons-D7S4wlne.js",
+  "/watch/assets/InstallGuideModal-BQfP8Pqt.js",
+  "/watch/assets/PermissionModal-DXDXZR-n.js",
+  "/watch/assets/PreviewPane-Cmxmxy7v.js",
+  "/watch/assets/ProjectMemoriesModal-Dp22qj3W.js",
+  "/watch/assets/QuotaModal-CU5Xkekh.js",
+  "/watch/assets/SettingsPanel-GnS3eQlG.js",
+  "/watch/assets/WorktreeModal-BiMh6Rsi.js",
+  "/watch/assets/index-G3w-loG2.js",
+  "/watch/assets/index-wqwcV2zK.css",
+  "/watch/assets/vendor-icons-C9DEoTWW.js",
   "/watch/assets/vendor-markdown-D6awl5rF.js",
   "/watch/assets/vendor-react-BCaoD2OB.js"
 ];
@@ -180,7 +180,7 @@ self.addEventListener('activate', event => {
     const keys = await caches.keys();
     await Promise.all(
       keys
-        .filter(k => (k.startsWith('walking-workstation-') || k === 'walking-workstation-shell-aaf28c89cb') && k !== CACHE_NAME)
+        .filter(k => (k.startsWith('walking-workstation-') || k === 'walking-workstation-shell-b158fb1385') && k !== CACHE_NAME)
         .map(k => caches.delete(k)),
     );
     await self.clients.claim();

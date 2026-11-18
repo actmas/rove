@@ -1,6 +1,6 @@
 import React, {useState, useEffect, useRef} from 'react';
 import {X, RefreshCw, Zap, Clock, ShieldCheck, Sparkles, Cpu, Layers} from 'lucide-react';
-import {api, post} from './api';
+import {api, post, getUsageAnalytics} from './api';
 
 function collectEarliestReset(data) {
   if (!data) return 0;
@@ -28,6 +28,8 @@ export default function QuotaModal({isOpen, onClose}) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [activeTab, setActiveTab] = useState('quotas');
+  const [analytics, setAnalytics] = useState(null);
   const lastForceAtRef = useRef(0);
 
   async function loadQuotas(force = false) {
@@ -42,6 +44,12 @@ export default function QuotaModal({isOpen, onClose}) {
       setLoading(false);
     }
   }
+
+  useEffect(() => {
+    if (isOpen && activeTab === 'analytics') {
+      getUsageAnalytics(7).then(setAnalytics).catch(() => {});
+    }
+  }, [isOpen, activeTab]);
 
   useEffect(() => {
     if (isOpen) {
@@ -141,6 +149,68 @@ export default function QuotaModal({isOpen, onClose}) {
 
         <div className="settings-body quota-body">
           {error && <div className="banner error">{error}</div>}
+          <div className="quota-tabs">
+            <button type="button" className={`quota-tab-btn ${activeTab === 'quotas' ? 'active' : ''}`} onClick={() => setActiveTab('quotas')}>实时额度</button>
+            <button type="button" className={`quota-tab-btn ${activeTab === 'analytics' ? 'active' : ''}`} onClick={() => setActiveTab('analytics')}>7天用量统计</button>
+          </div>
+
+          {activeTab === 'analytics' ? (
+            <section className="quota-section">
+              {!analytics ? (
+                <p className="empty-note">正在统计近 7 天任务与模型分布…</p>
+              ) : (
+                <div className="analytics-grid">
+                  <div className="analytics-summary-row">
+                    <div className="analytics-stat-card">
+                      <span>总任务数</span>
+                      <strong>{analytics.totals?.total_jobs || 0}</strong>
+                    </div>
+                    <div className="analytics-stat-card">
+                      <span>已完成</span>
+                      <strong>{analytics.totals?.completed_jobs || 0}</strong>
+                    </div>
+                    <div className="analytics-stat-card">
+                      <span>失败</span>
+                      <strong>{analytics.totals?.failed_jobs || 0}</strong>
+                    </div>
+                  </div>
+                  {analytics.by_engine?.length > 0 && (
+                    <div className="analytics-block">
+                      <h4>按引擎分布</h4>
+                      {analytics.by_engine.map(row => (
+                        <div key={row.engine} className="analytics-bar-row">
+                          <span>{row.engine}</span>
+                          <span>{row.total} 次（成功 {row.completed || 0}）</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {analytics.by_model?.length > 0 && (
+                    <div className="analytics-block">
+                      <h4>按模型分布 (Top 12)</h4>
+                      {analytics.by_model.map(row => (
+                        <div key={`${row.engine}-${row.model}`} className="analytics-bar-row">
+                          <span>{row.model}</span>
+                          <span>{row.total} 次</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {analytics.by_project?.length > 0 && (
+                    <div className="analytics-block">
+                      <h4>按项目活跃度</h4>
+                      {analytics.by_project.map(row => (
+                        <div key={row.project_name} className="analytics-bar-row">
+                          <span>{row.project_name}</span>
+                          <span>{row.total} 次 · {Math.round((row.tokens_used || 0) / 1000)}k tok</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </section>
+          ) : <>
 
           {/* Section 1: OpenAI Codex */}
           <section className="quota-section">
@@ -391,6 +461,7 @@ export default function QuotaModal({isOpen, onClose}) {
               <div className="quota-empty-note">{agy.detail || '未检测到 Antigravity 额度信息'}</div>
             )}
           </section>
+          </>}
         </div>
       </section>
     </div>

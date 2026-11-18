@@ -1,8 +1,8 @@
-import {useCallback, useEffect, useState} from 'react';
-import {RefreshCw, Smartphone, Monitor, ExternalLink, Globe} from 'lucide-react';
+import {useCallback, useEffect, useRef, useState} from 'react';
+import {RefreshCw, Smartphone, Monitor, ExternalLink, Globe, Crosshair, Bug} from 'lucide-react';
 import {base, getPreviewPorts} from './api';
 
-export default function PreviewPane({onError}) {
+export default function PreviewPane({onError, onAskPreview}) {
   const [ports, setPorts] = useState([]);
   const [port, setPort] = useState(() => {
     try {
@@ -15,6 +15,37 @@ export default function PreviewPane({onError}) {
   const [viewport, setViewport] = useState('desktop');
   const [nonce, setNonce] = useState(0);
   const [probing, setProbing] = useState(false);
+  const [inspecting, setInspecting] = useState(false);
+  const [consoleErrors, setConsoleErrors] = useState([]);
+  const iframeRef = useRef(null);
+
+  useEffect(() => {
+    const win = iframeRef.current?.contentWindow;
+    if (win) {
+      try { win.postMessage({type: 'rove-inspect-toggle', active: inspecting}, '*'); } catch {}
+    }
+  }, [inspecting]);
+
+  useEffect(() => {
+    function onMsg(ev) {
+      const d = ev.data;
+      if (!d || typeof d !== 'object') return;
+      if (d.type === 'rove-preview-error' && d.message) {
+        setConsoleErrors(prev => [d.message, ...prev.filter(x => x !== d.message)].slice(0, 15));
+      } else if (d.type === 'rove-preview-pick') {
+        setInspecting(false);
+        const snippet = [
+          `[预览元素拾取 · localhost:${port}/${subpath.replace(/^\/+/, '')}]`,
+          `选择器: \`${d.selector || d.tag}\``,
+          d.text ? `文本: "${d.text}"` : '',
+          '请基于此页面元素进行修改或优化：',
+        ].filter(Boolean).join('\n');
+        onAskPreview?.(snippet);
+      }
+    }
+    window.addEventListener('message', onMsg);
+    return () => window.removeEventListener('message', onMsg);
+  }, [port, subpath, onAskPreview]);
 
   const probe = useCallback(async () => {
     setProbing(true);
@@ -106,7 +137,29 @@ export default function PreviewPane({onError}) {
           >
             <Smartphone size={14}/>
           </button>
-          <button type="button" className="icon-button" onClick={() => setNonce(n => n + 1)} title="刷新预览">
+          <button
+            type="button"
+            className={`icon-button ${inspecting ? 'active' : ''}`}
+            onClick={() => setInspecting(v => !v)}
+            title={inspecting ? '退出元素拾取' : '点击页面元素直接回传给 AI 修改'}
+          >
+            <Crosshair size={14}/>
+          </button>
+          {consoleErrors.length > 0 && (
+            <button
+              type="button"
+              className="icon-button preview-err-btn"
+              onClick={() => {
+                const msg = `[预览控制台报错 (${consoleErrors.length}) · localhost:${numericPort}]\n` + consoleErrors.slice(0, 6).map(e => `- ${e}`).join('\n') + '\n请排查并修复以上前端报错：';
+                onAskPreview?.(msg);
+              }}
+              title={`抓取 ${consoleErrors.length} 条控制台报错并回传给 AI`}
+            >
+              <Bug size={14}/>
+              <span>{consoleErrors.length}</span>
+            </button>
+          )}
+          <button type="button" className="icon-button" onClick={() => { setConsoleErrors([]); setNonce(n => n + 1); }} title="刷新预览">
             <RefreshCw size={14}/>
           </button>
           {iframeSrc && (
@@ -120,6 +173,7 @@ export default function PreviewPane({onError}) {
       <div className="preview-stage">
         {validPort ? (
           <iframe
+            ref={iframeRef}
             key={`${numericPort}-${cleanSub}-${nonce}`}
             src={iframeSrc}
             title={`Local Dev Preview :${numericPort}`}

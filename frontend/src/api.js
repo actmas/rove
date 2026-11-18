@@ -500,3 +500,7 @@ export function compactSessionContext(sessionId) {
   return post(`sessions/${encodeURIComponent(sessionId)}/compact`, {});
 }
 
+export function getUsageAnalytics(days = 7) {
+  return api(`analytics/usage?days=${encodeURIComponent(days)}`);
+}
+

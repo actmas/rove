@@ -1935,7 +1935,16 @@ export default function App() {
                 {tab === 'terminal' ? (
                   <TerminalPane session={current} onError={onError} darkTheme={darkTheme}/>
                 ) : tab === 'preview' ? (
-                  <PreviewPane onError={onError}/>
+                  <PreviewPane
+                    onError={onError}
+                    onAskPreview={text => {
+                      setTab('chat');
+                      requestAnimationFrame(() => {
+                        composerInputRef.current?.setPrompt?.(text);
+                        composerInputRef.current?.focus?.();
+                      });
+                    }}
+                  />
                 ) : (
                   <CodePane
                     project={project}

@@ -8447,6 +8447,87 @@ pre {
   border-color: rgba(245, 158, 11, 0.25);
 }
 
+.quota-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.quota-tab-btn {
+  padding: 5px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.quota-tab-btn.active {
+  background: var(--accent, #3b82f6);
+  color: #fff;
+  border-color: transparent;
+}
+
+.analytics-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.analytics-summary-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.analytics-stat-card {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.analytics-stat-card span {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.analytics-stat-card strong {
+  font-size: 18px;
+}
+
+.analytics-block h4 {
+  font-size: 12.5px;
+  margin: 0 0 6px;
+  color: var(--text-muted);
+}
+
+.analytics-bar-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 12.5px;
+}
+
+.analytics-bar-row:nth-child(even) {
+  background: rgba(100, 116, 139, 0.06);
+}
+
+.preview-err-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--danger, #ef4444);
+  font-size: 11px;
+  font-weight: 600;
+}
+
 /* Multi-Agent Orchestration Stepper & Picker (Anti-AI-Slop compliant) */
 .orch-picker.orch-active {
   border-color: rgba(16, 185, 129, 0.35);
