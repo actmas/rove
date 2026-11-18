@@ -656,6 +656,7 @@ export default function App() {
   }, [active, enableWakeLock]);
 
   function applyEngineDefaults(nextEngine) {
+    const wasAutoEngine = engine === 'auto';
     setEngine(nextEngine);
     if (nextEngine === 'auto') {
       setModel('auto');
@@ -665,12 +666,17 @@ export default function App() {
     }
     const list = catalog?.[nextEngine]?.models || [];
     const def = list.find(m => m.isDefault) || list[0];
-    if (model !== 'auto' && def) {
-      setModel(def.id);
-      if (effort !== 'auto') {
+    if (def) {
+      if (wasAutoEngine || model !== 'auto') {
+        setModel(def.id);
+      }
+      if (wasAutoEngine || effort !== 'auto') {
         setEffort(def.defaultEffort || 'medium');
       }
       if (!def.supportsFast) setFast(false);
+    } else if (wasAutoEngine) {
+      setModel('');
+      setEffort('medium');
     }
     if (nextEngine !== 'codex') setFast(false);
   }
@@ -723,6 +729,7 @@ export default function App() {
   }
 
   function changeEngine(value) {
+    const wasAutoEngine = engine === 'auto';
     applyEngineDefaults(value);
     if (value === 'auto') {
       if (selected) {
@@ -734,11 +741,11 @@ export default function App() {
     }
     const list = catalog?.[value]?.models || [];
     const def = list.find(m => m.isDefault) || list[0];
-    const nextModel = model === 'auto' ? 'auto' : (def?.id || model);
-    const nextEffort = effort === 'auto' ? 'auto' : (def?.defaultEffort || 'medium');
+    const nextModel = (!wasAutoEngine && model === 'auto') ? 'auto' : (def?.id || (model === 'auto' ? '' : model));
+    const nextEffort = (!wasAutoEngine && effort === 'auto') ? 'auto' : (def?.defaultEffort || 'medium');
     if (selected) {
-      persistSessionPrefs({ engine: value, model: nextModel, effort: nextEffort });
-      if (events.length > 0 && nextModel !== 'auto') {
+      persistSessionPrefs({ engine: value, model: nextModel, effort: nextEffort, ...(value !== 'codex' ? {fast: false} : {}) });
+      if (events.length > 0 && nextModel && nextModel !== 'auto') {
         getHandoffPreview(selected, value, nextModel)
           .then(res => { if (res?.needed) setHandoffPreview(res); })
           .catch(() => {});
@@ -769,7 +776,7 @@ export default function App() {
     let nextEffort = effort;
     let nextFast = fast;
     if (found) {
-      if (effort !== 'auto' && (activeEngine === 'antigravity' || !found.efforts?.includes(effort))) {
+      if (activeEngine === 'antigravity' || (effort !== 'auto' && !found.efforts?.includes(effort))) {
         nextEffort = found.defaultEffort || found.efforts?.[0] || 'medium';
       }
       if (!found.supportsFast) nextFast = false;
@@ -875,7 +882,7 @@ export default function App() {
   async function handleEnqueue(text, steer = false) {
     if (!selected || !text) return;
     try {
-      await enqueueSessionMessage(selected, {text, steer, model, effort, mode, fast});
+      await enqueueSessionMessage(selected, {text, steer, engine, model, effort, mode, fast});
       await loadQueue();
     } catch (e) {
       setError(e.message);

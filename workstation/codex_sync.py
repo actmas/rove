@@ -390,8 +390,8 @@ def sync_projects_and_threads(force: bool = False, restore_dismissed: bool = Fal
                     conn.execute(
                         '''UPDATE sessions
                            SET project_id=?, title=?, updated=?,
-                               model=CASE WHEN engine='codex' THEN COALESCE(?, model) ELSE model END,
-                               effort=CASE WHEN engine='codex' THEN COALESCE(?, effort) ELSE effort END, pinned=?, cwd=?, originator=COALESCE(?, originator),
+                               model=CASE WHEN engine='codex' AND COALESCE(model, '') != 'auto' THEN COALESCE(?, model) ELSE model END,
+                               effort=CASE WHEN engine='codex' AND COALESCE(effort, '') != 'auto' THEN COALESCE(?, effort) ELSE effort END, pinned=?, cwd=?, originator=COALESCE(?, originator),
                                thread_kind=?, git_branch=COALESCE(?, git_branch), tokens_used=MAX(tokens_used, ?),
                                rollout_path=COALESCE(?, rollout_path), codex_name=?, codex_pinned=?,
                                native_codex_id=COALESCE(native_codex_id, ?)
