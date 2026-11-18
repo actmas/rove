@@ -436,3 +436,38 @@ export function getWorkstationDiagnostics() {
   return api('diagnostics');
 }
 
+export function putProjectFile(projectId, payload) {
+  return api(`projects/${encodeURIComponent(projectId)}/file`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function suggestGitCommit(projectId, payload = {}) {
+  return post(`projects/${encodeURIComponent(projectId)}/git/suggest-commit`, payload);
+}
+
+export function createGitPr(projectId, payload = {}) {
+  return post(`projects/${encodeURIComponent(projectId)}/git/pr`, payload);
+}
+
+export function createPairingToken() {
+  return post('auth/pairing-token', {});
+}
+
+export function getPreviewPorts() {
+  return api('preview/ports');
+}
+
+export function startArenaRun(payload) {
+  return post('arena/start', payload);
+}
+
+export function getArenaStatus(arenaId) {
+  return api(`arena/${encodeURIComponent(arenaId)}`);
+}
+
+export function adoptArenaWinner(arenaId, winnerSessionId) {
+  return post(`arena/${encodeURIComponent(arenaId)}/adopt`, {winner_session_id: winnerSessionId});
+}
+

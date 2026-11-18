@@ -52,6 +52,12 @@ from . import fork
 from . import model_router
 from . import webhooks
 from . import context_bridge
+from . import arena
+
+try:
+    import httpx
+except ImportError:
+    httpx = None
 
 COOKIE = 'walking_session'
 MODEL_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$')
@@ -218,10 +224,15 @@ async def security(request: Request, call_next):
                 origin = request.headers.get('origin')
                 if (origin and origin not in db.config()['origins']) or request.headers.get('x-workstation') != '1':
                     return JSONResponse({'detail': '请求来源无效'}, status_code=403)
-            if path != '/api/login' and not logged_in(request.cookies.get(COOKIE)):
+            if path not in ('/api/login', '/api/auth/pair') and not logged_in(request.cookies.get(COOKIE)):
                 return JSONResponse({'detail': '请登录工作台'}, status_code=401)
     response = await call_next(request)
     websocket_origins = ' '.join(o.replace('https://', 'wss://').replace('http://', 'ws://') for o in db.config()['origins'])
+    if path.startswith('/api/preview/'):
+        response.headers['X-Frame-Options'] = 'SAMEORIGIN'
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        response.headers['Content-Security-Policy'] = "frame-ancestors 'self'"
+        return response
     if (path.startswith('/assets/') or path.startswith('/watch/assets/')) and response.status_code == 200:
         cache_control = 'public, max-age=31536000, immutable'
         rel_asset = path.removeprefix('/watch').lstrip('/')
@@ -310,6 +321,82 @@ async def logout(request: Request, response: Response):
         db.execute('DELETE FROM logins WHERE token_hash=?', (hashlib.sha256(token.encode()).hexdigest(),))
     response.delete_cookie(COOKIE, path='/')
     return {'ok': True}
+
+
+_pairing_tokens: dict[str, float] = {}
+
+
+@app.post('/api/auth/pairing-token')
+async def create_pairing_token():
+    now = time.time()
+    for k in [k for k, exp in _pairing_tokens.items() if exp <= now]:
+        _pairing_tokens.pop(k, None)
+    token = secrets.token_urlsafe(24)
+    _pairing_tokens[token] = now + 120
+    return {'token': token, 'expires_in': 120, 'pair_path': f'/api/auth/pair?token={token}'}
+
+
+@app.get('/api/auth/pair')
+async def redeem_pairing_token(token: str, request: Request):
+    now = time.time()
+    matched = None
+    for k, exp in list(_pairing_tokens.items()):
+        if exp <= now:
+            _pairing_tokens.pop(k, None)
+            continue
+        if hmac.compare_digest(k, token):
+            matched = k
+    if not matched:
+        raise HTTPException(401, '配对二维码已过期或无效，请在桌面端重新生成')
+    _pairing_tokens.pop(matched, None)
+    session_token = secrets.token_urlsafe(32)
+    db.execute('DELETE FROM logins WHERE expires<?', (now,))
+    db.execute('INSERT INTO logins VALUES(?,?)', (hashlib.sha256(session_token.encode()).hexdigest(), now + 7 * 86400))
+    resp = RedirectResponse('/', status_code=303)
+    resp.set_cookie(COOKIE, session_token, max_age=7 * 86400, httponly=True, secure=request.url.scheme == 'https', samesite='lax', path='/')
+    return resp
+
+
+async def _probe_local_port(port: int) -> bool:
+    try:
+        _, writer = await asyncio.wait_for(asyncio.open_connection('127.0.0.1', port), timeout=0.15)
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+        return True
+    except Exception:
+        return False
+
+
+@app.get('/api/preview/ports')
+async def list_preview_ports():
+    candidates = [3000, 3001, 4173, 5173, 5174, 8000, 8080, 8888]
+    checks = await asyncio.gather(*(_probe_local_port(p) for p in candidates))
+    active_ports = [p for p, ok in zip(candidates, checks) if ok]
+    return {'ports': active_ports}
+
+
+@app.api_route('/api/preview/{port}', methods=['GET', 'HEAD'])
+@app.api_route('/api/preview/{port}/{subpath:path}', methods=['GET', 'HEAD'])
+async def proxy_local_preview(port: int, request: Request, subpath: str = ''):
+    if port < 3000 or port > 9999 or port == 8765:
+        raise HTTPException(400, '仅支持代理 3000–9999 范围的本地开发预览端口')
+    if httpx is None:
+        raise HTTPException(500, '服务端未安装 httpx，无法代理本地预览')
+    qs = f'?{request.url.query}' if request.url.query else ''
+    target_url = f'http://127.0.0.1:{port}/{subpath}{qs}'
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
+            upstream = await client.request(request.method, target_url)
+    except Exception as exc:
+        raise HTTPException(502, f'无法连接本地预览端口 {port}：{exc}') from exc
+    headers = {}
+    for k, v in upstream.headers.items():
+        kl = k.lower()
+        if kl in ('content-encoding', 'content-length', 'transfer-encoding', 'x-frame-options', 'content-security-policy'):
+            continue
+        headers[k] = v
+    return Response(content=upstream.content, status_code=upstream.status_code, headers=headers)
 
 
 def project(ident):
@@ -1911,7 +1998,7 @@ async def pause_or_resume_session_queue(ident: str, body: QueuePauseBody):
                         )
                         dispatched_job_id = next_job_id
                 if dispatched_job_id:
-                    ensure_worker(dispatched_job_id)
+                    spawn('workstation.worker', dispatched_job_id)
     return {'ok': True, 'session_id': ident, 'paused': body.paused, 'dispatched_job_id': dispatched_job_id}
 
 
@@ -2729,6 +2816,25 @@ async def read_file(ident: str, path: str, session_id: str | None = None):
     return await asyncio.to_thread(_read_text_file_checked, file, path)
 
 
+class WriteFileBody(BaseModel):
+    path: str = Field(min_length=1, max_length=500)
+    text: str = Field(max_length=1024 * 1024)
+    session_id: str | None = None
+
+
+@app.put('/api/projects/{ident}/file')
+async def write_project_file(ident: str, body: WriteFileBody):
+    file = safe_file(project(ident), body.path, body.session_id)
+    if file.is_dir():
+        raise HTTPException(400, '目标路径是目录，无法写入')
+    raw = body.text.encode('utf-8')
+    if len(raw) > 1024 * 1024:
+        raise HTTPException(413, '文件内容超过 1 MB 限制')
+    file.parent.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(file.write_bytes, raw)
+    return {'ok': True, 'path': body.path, 'bytes': len(raw)}
+
+
 def git_run(path, *args):
     result = subprocess.run(['git', '-c', 'core.quotepath=false', '-C', path, *args], capture_output=True, timeout=15)
     return result.returncode, result.stdout[:2 * 1024 * 1024].decode(errors='replace')
@@ -2797,6 +2903,120 @@ async def git_push(ident: str, body: GitPushBody | None = None):
     if proc.returncode != 0:
         raise HTTPException(409, (proc.stderr or proc.stdout or 'git push 失败')[:1000])
     return {'ok': True, 'output': (proc.stdout or proc.stderr or '已推送至远端').strip()}
+
+
+class GitSuggestBody(BaseModel):
+    session_id: str | None = None
+
+
+@app.post('/api/projects/{ident}/git/suggest-commit')
+async def git_suggest_commit(ident: str, body: GitSuggestBody | None = None):
+    p = project(ident)
+    req = body or GitSuggestBody()
+    workdir = str(_project_base(p, req.session_id))
+    rc_st, st_out = await asyncio.to_thread(git_run, workdir, 'status', '--short', '--', '.')
+    if rc_st != 0:
+        raise HTTPException(400, '当前目录不是 Git 仓库')
+    changed_files = [line[3:].strip() for line in st_out.splitlines() if len(line) > 3]
+    if not changed_files:
+        return {'message': 'chore: sync workspace updates'}
+    prompt_hint = ''
+    if req.session_id:
+        last_job = db.one('SELECT prompt FROM jobs WHERE session_id=? ORDER BY started DESC LIMIT 1', (req.session_id,))
+        if last_job and last_job.get('prompt'):
+            prompt_hint = str(last_job['prompt']).replace('\n', ' ').strip()[:60]
+    lower_files = ' '.join(changed_files).lower()
+    if 'readme' in lower_files or '.md' in lower_files:
+        prefix = 'docs'
+    elif 'test' in lower_files:
+        prefix = 'test'
+    elif any(k in (prompt_hint or '').lower() for k in ('fix', 'bug', '修复', '报错')):
+        prefix = 'fix'
+    else:
+        prefix = 'feat'
+    summary = prompt_hint or (f"update {', '.join(changed_files[:3])}" + (f' (+{len(changed_files) - 3} files)' if len(changed_files) > 3 else ''))
+    return {'message': f'{prefix}: {summary}'}
+
+
+class GitPrBody(BaseModel):
+    session_id: str | None = None
+    title: str = Field(default='', max_length=200)
+    body: str = Field(default='', max_length=4000)
+
+
+@app.post('/api/projects/{ident}/git/pr')
+async def git_create_pr(ident: str, body: GitPrBody | None = None):
+    p = project(ident)
+    req = body or GitPrBody()
+    workdir = str(_project_base(p, req.session_id))
+    if not shutil.which('gh'):
+        raise HTTPException(400, '宿主机未安装 GitHub CLI (gh)，请先安装并执行 gh auth login')
+    rc_br, br_out = await asyncio.to_thread(git_run, workdir, 'rev-parse', '--abbrev-ref', 'HEAD')
+    branch = br_out.strip() if rc_br == 0 else ''
+    if not branch or branch in ('main', 'master', 'HEAD'):
+        raise HTTPException(409, f'当前分支为 {branch or "HEAD"}，请先在 Worktree 或特性分支上提交后再创建 PR')
+    push_proc = await asyncio.to_thread(
+        subprocess.run, ['git', '-C', workdir, 'push', '-u', 'origin', branch],
+        capture_output=True, text=True, timeout=30,
+    )
+    if push_proc.returncode != 0:
+        raise HTTPException(409, (push_proc.stderr or push_proc.stdout or '推送分支失败')[:800])
+    title = req.title.strip() or f'feat: {branch}'
+    pr_body = req.body.strip() or f'Created from Rove workstation branch `{branch}`.'
+    pr_proc = await asyncio.to_thread(
+        subprocess.run, ['gh', 'pr', 'create', '--title', title, '--body', pr_body],
+        cwd=workdir, capture_output=True, text=True, timeout=30,
+    )
+    if pr_proc.returncode != 0:
+        raise HTTPException(409, (pr_proc.stderr or pr_proc.stdout or 'gh pr create 失败')[:800])
+    return {'ok': True, 'url': pr_proc.stdout.strip()}
+
+
+class ArenaStartBody(BaseModel):
+    project_id: str
+    prompt: str = Field(min_length=1, max_length=50000)
+    engine_a: str = 'codex'
+    engine_b: str = 'antigravity'
+    model_a: str = ''
+    model_b: str = ''
+
+
+class ArenaAdoptBody(BaseModel):
+    winner_session_id: str
+
+
+@app.post('/api/arena/start', status_code=201)
+async def api_arena_start(body: ArenaStartBody):
+    p = project(body.project_id)
+    try:
+        res = await asyncio.to_thread(
+            arena.start_arena_run, p, body.prompt, body.engine_a, body.engine_b, body.model_a, body.model_b
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    spawn('workstation.worker', res['job_a_id'])
+    spawn('workstation.worker', res['job_b_id'])
+    return res
+
+
+@app.get('/api/arena/{arena_id}')
+async def api_arena_status(arena_id: str):
+    try:
+        return await asyncio.to_thread(arena.get_arena_status, arena_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.post('/api/arena/{arena_id}/adopt')
+async def api_arena_adopt(arena_id: str, body: ArenaAdoptBody):
+    try:
+        return await asyncio.to_thread(arena.adopt_arena_winner, arena_id, body.winner_session_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.api_route('/healthz', methods=['GET', 'HEAD'])

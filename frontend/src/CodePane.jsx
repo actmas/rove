@@ -2,8 +2,12 @@ import {useCallback, useEffect, useMemo, useState} from 'react';
 import {
   Folder, FileCode, ChevronRight, ArrowLeft, RefreshCw, GitBranch,
   Search, Copy, Check, AtSign, FileDiff, Download, ExternalLink, FileArchive,
+  Pencil, Save, Sparkles, GitPullRequest,
 } from 'lucide-react';
-import {api, parseUnifiedDiff, fileUrl, downloadFile, fileMetaApiPath, formatFileSize, gitCommitProject, gitPushProject} from './api';
+import {
+  api, parseUnifiedDiff, fileUrl, downloadFile, fileMetaApiPath, formatFileSize,
+  gitCommitProject, gitPushProject, putProjectFile, suggestGitCommit, createGitPr,
+} from './api';
 
 function FileDiffCard({item, onOpenFile, onMentionFile, onAskDiffLine}) {
   const [selectedIdx, setSelectedIdx] = useState(null);
@@ -88,6 +92,58 @@ export default function CodePane({project, sessionId, onError, initialFile, onCo
   const [commitMsg, setCommitMsg] = useState('');
   const [gitBusy, setGitBusy] = useState(false);
   const [gitFeedback, setGitFeedback] = useState('');
+  const [editingFile, setEditingFile] = useState(false);
+  const [editDraft, setEditDraft] = useState('');
+  const [savingFile, setSavingFile] = useState(false);
+
+  async function handleSuggestCommit() {
+    if (!project || gitBusy) return;
+    setGitBusy(true);
+    try {
+      const res = await suggestGitCommit(project.id, {session_id: sessionId || null});
+      if (res?.message) setCommitMsg(res.message);
+    } catch (err) {
+      onError(err.message);
+    } finally {
+      setGitBusy(false);
+    }
+  }
+
+  async function handleCreatePr() {
+    if (!project || gitBusy) return;
+    setGitBusy(true);
+    setGitFeedback('');
+    try {
+      const res = await createGitPr(project.id, {
+        session_id: sessionId || null,
+        title: commitMsg.trim(),
+      });
+      setGitFeedback(res.url ? `已创建 PR：${res.url}` : '已创建 PR');
+    } catch (err) {
+      onError(err.message);
+    } finally {
+      setGitBusy(false);
+    }
+  }
+
+  async function handleSaveFile() {
+    if (!project || !file || savingFile) return;
+    setSavingFile(true);
+    try {
+      await putProjectFile(project.id, {
+        path: file.path,
+        text: editDraft,
+        session_id: sessionId || null,
+      });
+      setFile(prev => (prev ? {...prev, text: editDraft} : prev));
+      setEditingFile(false);
+      await loadDiff();
+    } catch (err) {
+      onError(err.message);
+    } finally {
+      setSavingFile(false);
+    }
+  }
 
   async function handleGitCommit(e) {
     e.preventDefault();
@@ -295,8 +351,24 @@ export default function CodePane({project, sessionId, onError, initialFile, onCo
                     onChange={e => setCommitMsg(e.target.value)}
                     disabled={gitBusy}
                   />
+                  <button
+                    type="button"
+                    onClick={handleSuggestCommit}
+                    disabled={gitBusy}
+                    title="根据当前变更与任务上下文自动拟定 Commit 说明"
+                  >
+                    <Sparkles size={13}/> 拟定
+                  </button>
                   <button type="submit" className="primary" disabled={gitBusy || !commitMsg.trim() || statusLines.length === 0}>
                     提交
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleCreatePr}
+                    disabled={gitBusy}
+                    title="推送当前分支并通过 gh 创建 GitHub PR"
+                  >
+                    <GitPullRequest size={13}/> PR
                   </button>
                   <button type="button" onClick={handleGitPush} disabled={gitBusy}>
                     推送
@@ -445,6 +517,28 @@ export default function CodePane({project, sessionId, onError, initialFile, onCo
                   </button>
                   <code>{file.path}</code>
                   <div className="button-row">
+                    {!file.meta && (
+                      editingFile ? (
+                        <>
+                          <button type="button" className="primary" onClick={handleSaveFile} disabled={savingFile}>
+                            <Save size={13}/><span>{savingFile ? '保存中…' : '保存'}</span>
+                          </button>
+                          <button type="button" onClick={() => setEditingFile(false)} disabled={savingFile}>
+                            取消
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditDraft(file.text || '');
+                            setEditingFile(true);
+                          }}
+                        >
+                          <Pencil size={13}/><span>编辑</span>
+                        </button>
+                      )
+                    )}
                     {onMentionFile && (
                       <button type="button" onClick={() => onMentionFile(file.path)}>
                         <AtSign size={13}/>引用到对话
@@ -531,6 +625,21 @@ export default function CodePane({project, sessionId, onError, initialFile, onCo
                       </div>
                     )}
                   </div>
+                ) : editingFile ? (
+                <div className="code-editor-wrap">
+                  <textarea
+                    className="code-editor-textarea"
+                    value={editDraft}
+                    onChange={e => setEditDraft(e.target.value)}
+                    onKeyDown={e => {
+                      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
+                        e.preventDefault();
+                        handleSaveFile();
+                      }
+                    }}
+                    spellCheck={false}
+                  />
+                </div>
                 ) : (
                 <div className="code-table-wrap">
                   <table className="code-table">

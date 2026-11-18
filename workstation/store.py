@@ -439,6 +439,21 @@ def init():
                 'CREATE VIRTUAL TABLE IF NOT EXISTS project_memories_fts '
                 'USING fts5(memory_id UNINDEXED, project_id UNINDEXED, category, content, why, how_to_apply)'
             )
+        db.execute('''
+            CREATE TABLE IF NOT EXISTS arena_runs(
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                prompt TEXT NOT NULL,
+                session_a_id TEXT NOT NULL,
+                session_b_id TEXT NOT NULL,
+                engine_a TEXT NOT NULL,
+                engine_b TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'running',
+                winner_session_id TEXT,
+                created REAL NOT NULL,
+                updated REAL NOT NULL
+            )
+        ''')
         _ensure_columns(db, 'sessions', {
             'execution_target': "TEXT NOT NULL DEFAULT 'local'",
             'cloud_environment': "TEXT NOT NULL DEFAULT ''",

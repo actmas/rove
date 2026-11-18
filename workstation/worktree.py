@@ -3,7 +3,10 @@
 Enables multiple sessions to modify code and run tests simultaneously on the same
 repository without colliding on the main working tree.
 """
+import contextlib
+import os
 from pathlib import Path
+import shutil
 import subprocess
 from typing import Any, Dict, List, Optional
 
@@ -64,6 +67,60 @@ def get_default_branch(project_path: str) -> str:
     return 'main'
 
 
+def bootstrap_worktree_env(project_path: str, worktree_dir: Path) -> Dict[str, Any]:
+    """Seed .env*, .worktreeinclude entries, and symlink heavy ignored dependency dirs into a fresh worktree."""
+    root = Path(project_path).resolve()
+    wt = Path(worktree_dir).resolve()
+    copied: List[str] = []
+    linked: List[str] = []
+
+    # 1. Copy .env* files (e.g. .env, .env.local) if not already present in worktree
+    for env_file in root.glob('.env*'):
+        if not env_file.is_file() or env_file.name.endswith('.example'):
+            continue
+        dest = (wt / env_file.name).resolve()
+        if dest.is_relative_to(wt) and not dest.exists():
+            with contextlib.suppress(OSError):
+                shutil.copy2(env_file, dest)
+                copied.append(env_file.name)
+
+    # 2. Process .worktreeinclude manifest if present
+    include_file = root / '.worktreeinclude'
+    if include_file.is_file():
+        for raw_line in include_file.read_text(encoding='utf-8', errors='ignore').splitlines():
+            rel = raw_line.strip()
+            if not rel or rel.startswith('#'):
+                continue
+            src = (root / rel).resolve()
+            dest = (wt / rel).resolve()
+            if not src.is_relative_to(root) or not dest.is_relative_to(wt) or not src.exists() or dest.exists():
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with contextlib.suppress(OSError):
+                if src.is_dir():
+                    os.symlink(src, dest)
+                    linked.append(rel)
+                elif src.is_file():
+                    shutil.copy2(src, dest)
+                    copied.append(rel)
+
+    # 3. Symlink heavy gitignored dependency directories so tests/dev servers work immediately
+    for dep_rel in ('node_modules', '.venv', 'venv', 'frontend/node_modules'):
+        src = (root / dep_rel).resolve()
+        dest = (wt / dep_rel).resolve()
+        if not src.is_dir() or dest.exists() or not dest.is_relative_to(wt):
+            continue
+        ignored = _run_git(['check-ignore', '-q', dep_rel], cwd=str(root), check=False).returncode == 0
+        if not ignored:
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(OSError):
+            os.symlink(src, dest)
+            linked.append(dep_rel)
+
+    return {'copied': copied, 'linked': linked}
+
+
 def create_session_worktree(project: Dict[str, Any], session: Dict[str, Any]) -> Dict[str, Any]:
     project_path = str(Path(project['path']).resolve())
     if not is_git_repository(project_path):
@@ -101,6 +158,8 @@ def create_session_worktree(project: Dict[str, Any], session: Dict[str, Any]) ->
         # Create new branch from HEAD
         _run_git(['worktree', 'add', '-b', branch_name, str(worktree_dir), 'HEAD'], cwd=project_path)
 
+    bootstrapped = bootstrap_worktree_env(project_path, worktree_dir)
+
     db.execute(
         'UPDATE sessions SET use_worktree=1, worktree_path=?, git_branch=?, cwd=? WHERE id=?',
         (str(worktree_dir), branch_name, str(worktree_dir), session_id),
@@ -110,6 +169,7 @@ def create_session_worktree(project: Dict[str, Any], session: Dict[str, Any]) ->
         'path': str(worktree_dir),
         'branch': branch_name,
         'is_worktree': True,
+        'bootstrapped': bootstrapped,
     }
 
 

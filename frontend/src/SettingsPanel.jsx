@@ -9,6 +9,7 @@ import {
   getAgentsHub, upsertAgent, deleteAgent, checkAgent,
   getClusterStatus, updateClusterConfig, probeClusterPeer,
   createClusterSnapshot, restoreClusterSnapshot, pushClusterSnapshot, pullClusterSnapshot,
+  createPairingToken,
 } from './api';
 import RoveMark from './RoveMark';
 
@@ -37,6 +38,22 @@ export default function SettingsPanel({
   const [watchNotice, setWatchNotice] = useState('');
   const [copiedWatchKey, setCopiedWatchKey] = useState('');
   const [error, setError] = useState('');
+  const [pairingInfo, setPairingInfo] = useState(null);
+  const [pairingBusy, setPairingBusy] = useState(false);
+
+  async function handleGeneratePairing() {
+    setPairingBusy(true);
+    setError('');
+    try {
+      const res = await createPairingToken();
+      const fullUrl = new URL(res.pair_path.replace(/^\//, ''), base).toString();
+      setPairingInfo({...res, fullUrl});
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setPairingBusy(false);
+    }
+  }
   const [checked, setChecked] = useState(null);
   const antigravity = checked || engines.antigravity;
 
@@ -1562,9 +1579,31 @@ export default function SettingsPanel({
             <p className="setting-description">
               关闭浏览器或切换网络后，后台任务与 PTY 终端持续运行；通过事件游标在任意设备上无缝接力。
             </p>
-            <button type="button" onClick={onLogout}>
-              <LogOut size={15}/>锁定并退出当前设备
-            </button>
+            <div className="button-row" style={{flexWrap: 'wrap', gap: '8px', marginBottom: '10px'}}>
+              <button type="button" onClick={handleGeneratePairing} disabled={pairingBusy}>
+                <Smartphone size={15}/>{pairingBusy ? '生成中…' : '生成手机免密配对链接（120秒单次有效）'}
+              </button>
+              <button type="button" onClick={onLogout}>
+                <LogOut size={15}/>锁定并退出当前设备
+              </button>
+            </div>
+            {pairingInfo && (
+              <div className="pairing-box">
+                <div className="pairing-url-row">
+                  <code className="pairing-url">{pairingInfo.fullUrl}</code>
+                  <button
+                    type="button"
+                    className="copy-pill"
+                    onClick={() => navigator.clipboard?.writeText(pairingInfo.fullUrl)}
+                  >
+                    <Copy size={12}/> 复制链接
+                  </button>
+                </div>
+                <p className="setting-description" style={{margin: 0}}>
+                  在手机浏览器打开或通过系统隔空投送 / 二维码发送此链接即可自动登录（120 秒内单次有效）。
+                </p>
+              </div>
+            )}
           </section>
 
           {error && <p className="error" role="alert">{error}</p>}

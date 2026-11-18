@@ -14,6 +14,7 @@ import {
   purgeCacheAndReload, revertJobCheckpoint, promoteScratchSession,
   getSessionQueue, enqueueSessionMessage, updateQueuedMessage, cancelQueuedMessage,
   pauseSessionQueue, getHandoffPreview, getWorkstationDiagnostics,
+  startArenaRun, getArenaStatus, adoptArenaWinner,
 } from './api';
 import {usePwaManager, clearAppBadgeSafe} from './pwa';
 import {deleteHistory} from './historyCache';
@@ -31,6 +32,7 @@ import {acquireWakeLock, releaseWakeLock} from './wakelock';
 
 const TerminalPane = lazy(() => import('./TerminalPane'));
 const CodePane = lazy(() => import('./CodePane'));
+const PreviewPane = lazy(() => import('./PreviewPane'));
 
 const ALL_PROJECTS = '__all__';
 
@@ -188,6 +190,12 @@ export default function App() {
   const [handoffPreview, setHandoffPreview] = useState(null);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [diagnosticsData, setDiagnosticsData] = useState(null);
+  const [arenaOpen, setArenaOpen] = useState(false);
+  const [arenaPrompt, setArenaPrompt] = useState('');
+  const [arenaEngineA, setArenaEngineA] = useState('codex');
+  const [arenaEngineB, setArenaEngineB] = useState('antigravity');
+  const [arenaRun, setArenaRun] = useState(null);
+  const [arenaBusy, setArenaBusy] = useState(false);
   const [quotaOpen, setQuotaOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [worktreeOpen, setWorktreeOpen] = useState(false);
@@ -1537,6 +1545,18 @@ export default function App() {
                 <Code2 size={15}/>
                 <span>代码</span>
               </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={tab === 'preview'}
+                className={tab === 'preview' ? 'active' : ''}
+                onClick={() => setTab('preview')}
+                aria-label="实时预览"
+                title="本地开发服务器实时预览"
+              >
+                <Monitor size={15}/>
+                <span>预览</span>
+              </button>
             </div>
 
             {current?.use_worktree && (
@@ -1605,6 +1625,20 @@ export default function App() {
                     <span className="popover-item-sub">集中处理审批、提问、失败任务与引擎状态</span>
                   </div>
                 </button>
+
+                {activeProject && (
+                  <button
+                    type="button"
+                    className="popover-item"
+                    onClick={() => setArenaOpen(true)}
+                  >
+                    <Layers size={15} style={{color: 'var(--accent)'}}/>
+                    <div className="popover-item-text">
+                      <span className="popover-item-title">双引擎对比跑 (Arena)</span>
+                      <span className="popover-item-sub">同一需求同时交由两个引擎在独立 Worktree 对比实现</span>
+                    </div>
+                  </button>
+                )}
 
                 {activeProject && (
                   <button
@@ -1796,6 +1830,8 @@ export default function App() {
                 {error && <div className="error pane-error" role="alert">{error}</div>}
                 {tab === 'terminal' ? (
                   <TerminalPane session={current} onError={onError} darkTheme={darkTheme}/>
+                ) : tab === 'preview' ? (
+                  <PreviewPane onError={onError}/>
                 ) : (
                   <CodePane
                     project={project}
@@ -1924,6 +1960,135 @@ export default function App() {
                           <span>[{j.engine || 'agent'}] {j.session_title}: {(j.error || '执行失败').slice(0, 80)}</span>
                         </button>
                       ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {arenaOpen && (
+          <div className="modal-backdrop" onClick={() => setArenaOpen(false)}>
+            <div className="modal-card handoff-modal" onClick={e => e.stopPropagation()}>
+              <div className="modal-header">
+                <h3>双引擎并行对比跑 (Arena)</h3>
+                <button type="button" className="icon-button" onClick={() => setArenaOpen(false)}><X size={16}/></button>
+              </div>
+              <div className="modal-body handoff-body">
+                {!arenaRun ? (
+                  <>
+                    <p className="setting-description" style={{margin: 0}}>
+                      自动为当前项目创建两棵独立 Git Worktree，同时用两个引擎执行同一任务，完成后对比代码变更行数并择优合并。
+                    </p>
+                    <div className="arena-select-row">
+                      <label>
+                        <span>引擎 A</span>
+                        <select value={arenaEngineA} onChange={e => setArenaEngineA(e.target.value)}>
+                          <option value="codex">Codex</option>
+                          <option value="antigravity">Antigravity</option>
+                          <option value="claude-code">Claude Code</option>
+                          <option value="gemini-cli">Gemini CLI</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>引擎 B</span>
+                        <select value={arenaEngineB} onChange={e => setArenaEngineB(e.target.value)}>
+                          <option value="antigravity">Antigravity</option>
+                          <option value="codex">Codex</option>
+                          <option value="claude-code">Claude Code</option>
+                          <option value="gemini-cli">Gemini CLI</option>
+                        </select>
+                      </label>
+                    </div>
+                    <textarea
+                      className="arena-prompt-input"
+                      rows={4}
+                      placeholder="输入要让两个引擎同时实现的需求描述…"
+                      value={arenaPrompt}
+                      onChange={e => setArenaPrompt(e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      className="primary"
+                      disabled={arenaBusy || !arenaPrompt.trim() || !activeProject}
+                      onClick={async () => {
+                        setArenaBusy(true);
+                        try {
+                          const started = await startArenaRun({
+                            project_id: activeProject.id,
+                            prompt: arenaPrompt.trim(),
+                            engine_a: arenaEngineA,
+                            engine_b: arenaEngineB,
+                          });
+                          const status = await getArenaStatus(started.id);
+                          setArenaRun(status);
+                          await refresh();
+                        } catch (e) {
+                          setError(e.message);
+                        } finally {
+                          setArenaBusy(false);
+                        }
+                      }}
+                    >
+                      {arenaBusy ? '正在启动双 Worktree…' : '同时启动对比执行'}
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <div className="arena-compare-grid">
+                      {[arenaRun.candidate_a, arenaRun.candidate_b].map((cand, idx) => (
+                        <div key={cand.session_id} className="arena-card">
+                          <div className="arena-card-head">
+                            <strong>方案 {idx === 0 ? 'A' : 'B'} · {cand.engine}</strong>
+                            <span className="diag-chip">{cand.job_status}</span>
+                          </div>
+                          <div className="arena-card-stats">
+                            <span className="stat-add">+{cand.diff?.additions || 0}</span>
+                            <span className="stat-del">-{cand.diff?.deletions || 0}</span>
+                          </div>
+                          <div className="button-row" style={{marginTop: '8px'}}>
+                            <button
+                              type="button"
+                              onClick={() => { setSelected(cand.session_id); setArenaOpen(false); }}
+                            >
+                              查看会话
+                            </button>
+                            <button
+                              type="button"
+                              className="primary"
+                              disabled={arenaBusy || arenaRun.status === 'adopted'}
+                              onClick={async () => {
+                                setArenaBusy(true);
+                                try {
+                                  await adoptArenaWinner(arenaRun.id, cand.session_id);
+                                  setArenaOpen(false);
+                                  setArenaRun(null);
+                                  await refresh();
+                                } catch (e) {
+                                  setError(e.message);
+                                } finally {
+                                  setArenaBusy(false);
+                                }
+                              }}
+                            >
+                              采纳此方案并合并
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="button-row">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const next = await getArenaStatus(arenaRun.id);
+                          setArenaRun(next);
+                        }}
+                      >
+                        <RefreshCw size={13}/> 刷新对比结果
+                      </button>
+                      <button type="button" onClick={() => setArenaRun(null)}>新建对比</button>
                     </div>
                   </>
                 )}

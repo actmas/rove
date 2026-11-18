@@ -2,7 +2,7 @@ import {useCallback, useEffect, useRef, useState} from 'react';
 import {
   ArrowUp, Folder, Square, ChevronDown, Brain, SlidersHorizontal,
   ShieldCheck, Zap, ImagePlus, AtSign, X, FileCode, Sparkles,
-  Cloud, Laptop, ExternalLink, Info, Pause, Play, Pencil, Trash2, ListOrdered,
+  Cloud, Laptop, ExternalLink, Info, Pause, Play, Pencil, Trash2, ListOrdered, Mic, MicOff,
 } from 'lucide-react';
 import {api, post, compressImageFile} from './api';
 
@@ -58,6 +58,40 @@ export default function Composer({
   const draftAttachKey = `walking-workstation:draft-att:${sessionId || 'new'}`;
   const [editingQueueId, setEditingQueueId] = useState(null);
   const [editingQueueText, setEditingQueueText] = useState('');
+  const [listening, setListening] = useState(false);
+  const speechRef = useRef(null);
+
+  function toggleDictation() {
+    if (listening && speechRef.current) {
+      speechRef.current.stop();
+      setListening(false);
+      return;
+    }
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      onError?.('当前浏览器不支持网页语音识别，请使用手机键盘语音输入');
+      return;
+    }
+    try {
+      const rec = new SR();
+      rec.lang = 'zh-CN';
+      rec.interimResults = false;
+      rec.continuous = false;
+      rec.onresult = ev => {
+        const transcript = Array.from(ev.results || []).map(r => r[0]?.transcript || '').join('').trim();
+        if (transcript) {
+          setPrompt(prev => (prev ? `${prev.trimEnd()} ${transcript}` : transcript));
+        }
+      };
+      rec.onerror = () => setListening(false);
+      rec.onend = () => setListening(false);
+      speechRef.current = rec;
+      setListening(true);
+      rec.start();
+    } catch {
+      setListening(false);
+    }
+  }
 
   // Isolate draft text and image state locally if not controlled by parent
   const [internalPrompt, setInternalPrompt] = useState(() => {
@@ -815,6 +849,16 @@ export default function Composer({
               disabled={active || sending || images.length >= 4}
             >
               <ImagePlus size={16}/>
+            </button>
+            <button
+              type="button"
+              className={`tool-icon-btn ${listening ? 'is-listening' : ''}`}
+              title={listening ? '停止语音口述' : '语音口述输入'}
+              aria-label="语音输入"
+              onClick={toggleDictation}
+              disabled={sending}
+            >
+              {listening ? <MicOff size={16}/> : <Mic size={16}/>}
             </button>
 
             {active ? (
