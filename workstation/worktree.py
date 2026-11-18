@@ -211,10 +211,16 @@ def get_session_worktree(project: Dict[str, Any], session: Dict[str, Any]) -> Op
     }
 
 
-def remove_session_worktree(project: Dict[str, Any], session: Dict[str, Any], force: bool = True) -> bool:
+def remove_session_worktree(
+    project: Dict[str, Any],
+    session: Dict[str, Any],
+    force: bool = True,
+    delete_branch: bool = False,
+) -> bool:
     wt_path = session.get('worktree_path')
     project_path = str(Path(project['path']).resolve())
     session_id = session['id']
+    branch = session.get('git_branch') or f"rove/{session_id[:8]}"
 
     if wt_path and Path(wt_path).exists():
         cmd = ['worktree', 'remove']
@@ -223,6 +229,11 @@ def remove_session_worktree(project: Dict[str, Any], session: Dict[str, Any], fo
         cmd.append(str(wt_path))
         _run_git(cmd, cwd=project_path, check=False)
         _run_git(['worktree', 'prune'], cwd=project_path, check=False)
+
+    if delete_branch and branch and is_git_repository(project_path):
+        # Only delete branch safely (-d) if merged/reachable, or force (-D) when explicitly requested on clean recycle
+        flag = '-D' if force else '-d'
+        _run_git(['branch', flag, branch], cwd=project_path, check=False)
 
     db.execute(
         'UPDATE sessions SET use_worktree=0, worktree_path=NULL, cwd=NULL WHERE id=?',

@@ -2,9 +2,9 @@ import {useCallback, useEffect, useRef, useState} from 'react';
 import {
   ArrowUp, Folder, Square, ChevronDown, Brain, SlidersHorizontal,
   ShieldCheck, Zap, ImagePlus, AtSign, X, FileCode, Sparkles,
-  Cloud, Laptop, ExternalLink, Info, Pause, Play, Pencil, Trash2, ListOrdered, Mic, MicOff,
+  Cloud, Laptop, ExternalLink, Info, Pause, Play, Pencil, Trash2, ListOrdered, Mic, MicOff, Minimize2,
 } from 'lucide-react';
-import {api, post, compressImageFile, previewAutoSelect} from './api';
+import {api, post, compressImageFile, previewAutoSelect, getProjectCommands} from './api';
 
 export default function Composer({
   sessionId = 'new', initialExecutionTarget = 'local', initialCloudEnvironment = '',
@@ -14,6 +14,8 @@ export default function Composer({
   error, onError, projects, projectId, onProjectChange, sessionLocked, sessionCwd,
   engine, onEngineChange, engineState, catalog,
   model, onModelChange, effort, onEffortChange, mode, onModeChange, fast, onFastChange,
+  orchestration = 'off', onOrchestrationChange,
+  tokensUsed = 0, onCompact,
   onOpenSettings, externalRef, quotedRef, onClearQuote, lastPrompt,
   queue = [], queuePaused = false, supportsLiveSteer = false,
   onEnqueue, onUpdateQueue, onDeleteQueue, onToggleQueuePause,
@@ -346,6 +348,65 @@ export default function Composer({
     });
   }
 
+  const [slashQuery, setSlashQuery] = useState(null);
+  const [slashCommands, setSlashCommands] = useState([]);
+  const [slashIndex, setSlashIndex] = useState(0);
+  const slashLoadedProjRef = useRef('');
+
+  useEffect(() => {
+    if (slashQuery === null || !projectId || slashLoadedProjRef.current === projectId) return;
+    let cancelled = false;
+    getProjectCommands(projectId)
+      .then(res => {
+        if (!cancelled && Array.isArray(res?.commands)) {
+          slashLoadedProjRef.current = projectId;
+          setSlashCommands(res.commands);
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [slashQuery, projectId]);
+
+  const filteredSlash = slashQuery === null
+    ? []
+    : slashCommands.filter(c => c.name.toLowerCase().includes(slashQuery.toLowerCase())).slice(0, 8);
+
+  function detectSlash(value, cursor) {
+    if (cursor == null || !value || !value.startsWith('/')) {
+      setSlashQuery(prev => (prev !== null ? null : prev));
+      return;
+    }
+    const before = value.slice(0, cursor);
+    const match = before.match(/^\/([A-Za-z0-9_-]{0,40})$/);
+    if (!match) {
+      setSlashQuery(prev => (prev !== null ? null : prev));
+      return;
+    }
+    setSlashQuery(match[1]);
+    setSlashIndex(0);
+  }
+
+  function applySlashCommand(cmd) {
+    if (!cmd) return;
+    setSlashQuery(null);
+    if (cmd.action === 'mode') {
+      onModeChange?.(cmd.value);
+      setPrompt('');
+    } else if (cmd.action === 'compact') {
+      setPrompt('');
+      onCompact?.();
+    } else {
+      setPrompt(cmd.value || `/${cmd.name} `);
+    }
+    requestAnimationFrame(() => {
+      const el = localRef.current;
+      if (el) {
+        el.focus();
+        adjustHeight(el);
+      }
+    });
+  }
+
   function insertMention(item) {
     if (!mention) return;
     const next = `${prompt.slice(0, mention.start)}\`${item.path}\` ${prompt.slice(mention.end)}`;
@@ -422,6 +483,7 @@ export default function Composer({
     const val = e.target.value;
     setPrompt(val);
     detectMention(val, e.target.selectionStart);
+    detectSlash(val, e.target.selectionStart);
     adjustHeight(e.target);
   }
 
@@ -430,6 +492,7 @@ export default function Composer({
     setPrompt(val);
     if (!isComposingRef.current) {
       detectMention(val, e.target.selectionStart);
+      detectSlash(val, e.target.selectionStart);
     }
     adjustHeight(e.target);
   }
@@ -437,6 +500,28 @@ export default function Composer({
   function handleKeyDown(e) {
     if (e.nativeEvent.isComposing || isComposingRef.current || e.keyCode === 229) {
       return;
+    }
+    if (slashQuery !== null && filteredSlash.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setSlashIndex(i => (i + 1) % filteredSlash.length);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setSlashIndex(i => (i - 1 + filteredSlash.length) % filteredSlash.length);
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        applySlashCommand(filteredSlash[slashIndex] || filteredSlash[0]);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setSlashQuery(null);
+        return;
+      }
     }
     if (mention && fileResults.length > 0) {
       if (e.key === 'ArrowDown') {
@@ -515,7 +600,11 @@ export default function Composer({
         return;
       }
       if (cloud && !cloudEnvironment.trim()) { onError?.('请填写 Codex 云端环境 ID'); return; }
-      const ok = await onSend(finalPrompt, images, {execution_target: executionTarget, cloud_environment: cloudEnvironment.trim()});
+      const ok = await onSend(finalPrompt, images, {
+        execution_target: executionTarget,
+        cloud_environment: cloudEnvironment.trim(),
+        orchestration,
+      });
       if (ok) {
         if (cloud && cloudEnvironment.trim()) {
           try {
@@ -547,6 +636,24 @@ export default function Composer({
 
   return (
     <div className="composer-wrap">
+      {slashQuery !== null && filteredSlash.length > 0 && (
+        <div className="mention-popover slash-popover" role="listbox" aria-label="快捷斜杠命令">
+          <div className="mention-header">快捷命令与项目工作流 (/)</div>
+          {filteredSlash.map((cmd, idx) => (
+            <button
+              type="button"
+              key={`${cmd.source}-${cmd.name}`}
+              className={`mention-item ${idx === slashIndex ? 'active' : ''}`}
+              onMouseDown={e => {e.preventDefault(); applySlashCommand(cmd);}}
+            >
+              <span className="slash-cmd-name">/{cmd.name}</span>
+              <span className="slash-cmd-desc">{cmd.description}</span>
+              {cmd.source !== 'builtin' && <span className="slash-cmd-tag">{cmd.source}</span>}
+            </button>
+          ))}
+        </div>
+      )}
+
       {mention && fileResults.length > 0 && (
         <div className="mention-popover" role="listbox" aria-label="引用项目文件">
           <div className="mention-header">选择项目文件插入引用</div>
@@ -727,6 +834,18 @@ export default function Composer({
           </div>
         )}
 
+        {sessionId && sessionId !== 'new' && tokensUsed >= 60000 && (
+          <div className={`context-meter-pill ${tokensUsed >= 140000 ? 'is-high' : ''}`}>
+            <span>上下文约 {Math.round(tokensUsed / 1000)}k tokens{tokensUsed >= 140000 ? '（建议压缩换窗）' : ''}</span>
+            {onCompact && !active && (
+              <button type="button" className="queue-action-btn" onClick={onCompact} title="主动归档旧窗口并压缩上下文 (/compact)">
+                <Minimize2 size={11}/>
+                <span>压缩</span>
+              </button>
+            )}
+          </div>
+        )}
+
         <div className="composer-toolbar">
           <div className="composer-selectors">
             {!sessionLocked ? (
@@ -775,6 +894,26 @@ export default function Composer({
               </select>
               <ChevronDown size={12}/>
             </label>
+
+            {!cloud && onOrchestrationChange && (
+              <label
+                className={`pill-select orch-picker ${orchestration !== 'off' ? 'orch-active' : ''}`}
+                title="多模型协同编排：自动拆解任务并调度规划/编码/异构交叉审查智能体"
+              >
+                <span className="orch-dot" aria-hidden="true"/>
+                <select
+                  aria-label="多模型协同"
+                  value={orchestration}
+                  onChange={e => onOrchestrationChange(e.target.value)}
+                  disabled={active || sending}
+                >
+                  <option value="off">单 Agent</option>
+                  <option value="relay">串行协同</option>
+                  <option value="auto">自动协同</option>
+                </select>
+                <ChevronDown size={12}/>
+              </label>
+            )}
 
             {dualTarget && (
               <label

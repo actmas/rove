@@ -389,6 +389,88 @@ def is_agent_installed(agent_id: str) -> bool:
     return bool(resolve_binary(spec.get('binary', '')))
 
 
+def get_engine_capabilities(agent_id: str) -> Dict[str, Any]:
+    """Return verified runtime capability flags for an engine or custom agent.
+
+    Prevents text-only HTTP adapters from being scheduled for repo read/write/test
+    steps, and tells the orchestrator whether read-only plan mode and cancellation
+    are enforced by the adapter.
+    """
+    if agent_id == 'codex':
+        return {
+            'repo_read': True,
+            'repo_write': True,
+            'test_exec': True,
+            'read_only_enforced': True,
+            'approval_bridge': True,
+            'cancel': True,
+            'resume': True,
+            'structured_output': True,
+            'vision': True,
+            'max_concurrency': 2,
+        }
+    if agent_id == 'antigravity':
+        return {
+            'repo_read': True,
+            'repo_write': True,
+            'test_exec': True,
+            'read_only_enforced': True,
+            'approval_bridge': True,
+            'cancel': True,
+            'resume': True,
+            'structured_output': True,
+            'vision': True,
+            'max_concurrency': 2,
+        }
+
+    spec = get_agent_spec(agent_id)
+    if not spec:
+        return {
+            'repo_read': False,
+            'repo_write': False,
+            'test_exec': False,
+            'read_only_enforced': False,
+            'approval_bridge': False,
+            'cancel': False,
+            'resume': False,
+            'structured_output': False,
+            'vision': False,
+            'max_concurrency': 1,
+        }
+
+    adapter = spec.get('adapter', 'cli')
+    if adapter == 'openai_http':
+        # Current HTTP adapter only streams chat completions without a tool-execution loop.
+        return {
+            'repo_read': False,
+            'repo_write': False,
+            'test_exec': False,
+            'read_only_enforced': True,
+            'approval_bridge': False,
+            'cancel': True,
+            'resume': False,
+            'structured_output': True,
+            'vision': False,
+            'max_concurrency': 2,
+        }
+
+    mode_flags = spec.get('mode_flags') or {}
+    has_plan_mode = bool(mode_flags.get('plan'))
+    has_resume = bool((spec.get('resume_flag') or '').strip())
+    return {
+        'repo_read': True,
+        'repo_write': True,
+        'test_exec': True,
+        'read_only_enforced': has_plan_mode,
+        'approval_bridge': adapter == 'acp',
+        'cancel': True,
+        'resume': has_resume,
+        'structured_output': True,
+        'vision': True,
+        'max_concurrency': 1,
+    }
+
+
 def _normalize_models(raw_models: Any, agent_name: str) -> List[Dict[str, Any]]:
     if not isinstance(raw_models, list) or not raw_models:
         return [{

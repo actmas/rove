@@ -24,6 +24,7 @@ from . import context_bridge
 from . import input_handoff
 from . import loop_guard
 from . import model_router
+from . import orchestrator
 from . import quota_wait
 from . import quotas
 from . import review
@@ -636,7 +637,7 @@ async def run(ident):
                     '🪟【上下文满窗已准备自动换窗】已归档旧原生窗口并准备好结构化交接上下文，可直接重试或发送下一条指令继续。'
                 )
                 db.event(session['id'], ident, 'notice', {'text': note})
-        elif quota_wait.is_quota_limit_error(err_msg, engine=active_engine):
+        elif not job.get('orch_run_id') and quota_wait.is_quota_limit_error(err_msg, engine=active_engine):
             with contextlib.suppress(Exception):
                 q_snap = quotas.get_cached_quotas() if hasattr(quotas, 'get_cached_quotas') else None
                 has_out = context_bridge.has_turn_side_effects(session['id'], ident)
@@ -655,6 +656,10 @@ async def run(ident):
                     db.event(session['id'], ident, 'notice', {
                         'text': f"⏳【额度耗尽自动续跑】将在 {reset_str} 自动继续本任务（第 {wait_row['attempts']}/{quota_wait.MAX_AUTO_CONTINUE_ATTEMPTS} 次）；发送新消息、切换模型或点击取消可随时终止等待。"
                     })
+    if job.get('orch_run_id'):
+        with contextlib.suppress(Exception):
+            orchestrator.on_worker_finished(job, session, project, outcome)
+        return
     await webpush.notify_job_outcome(ident, session, project, outcome)
     # Apply deferred runtime changes & dispatch next queued message if any
     with contextlib.suppress(Exception):

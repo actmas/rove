@@ -727,3 +727,186 @@ def auto_select_model_and_effort(
         f"{eng_label} · {best['model_name']} · {best['effort_label']}"
     )
     return best
+
+
+def infer_model_family(engine: str, model_id: Optional[str]) -> str:
+    """Infer underlying model family (gpt/gemini/claude/deepseek/other) for diversity checks."""
+    mid = (model_id or '').lower()
+    if 'claude' in mid or 'sonnet' in mid or 'opus' in mid or 'haiku' in mid:
+        return 'claude'
+    if 'gemini' in mid or 'argon' in mid or 'hydrogen' in mid or 'flash' in mid:
+        return 'gemini'
+    if 'deepseek' in mid:
+        return 'deepseek'
+    if 'gpt' in mid or 'sol' in mid or 'astra' in mid or 'luna' in mid or 'terra' in mid or re.search(r'(?:^|[-_.])o[134](?:$|[-_.])', mid):
+        return 'openai_gpt'
+    if engine == 'codex':
+        return 'openai_gpt'
+    if engine == 'antigravity':
+        return 'gemini'
+    if engine == 'claude-code':
+        return 'claude'
+    if engine == 'gemini-cli':
+        return 'gemini'
+    return engine or 'unknown'
+
+
+_ROLE_TARGET_TIER = {
+    'planner': ('flagship', 'high'),
+    'coder_backend': ('balanced', 'medium'),
+    'coder_frontend': ('balanced', 'high'),
+    'coder_fast': ('fast', 'low'),
+    'verifier': ('fast', 'medium'),
+    'reviewer': ('flagship', 'high'),
+}
+
+
+def select_model_for_role(
+    role: str,
+    prompt: str = '',
+    mode: str = 'standard',
+    has_images: bool = False,
+    quotas_snapshot: Optional[Dict[str, Any]] = None,
+    catalog: Optional[Dict[str, Any]] = None,
+    installed_engines: Optional[List[str]] = None,
+    required_capabilities: Optional[List[str]] = None,
+    exclude_engine: Optional[str] = None,
+    exclude_model_family: Optional[str] = None,
+    strict_heterogeneous: bool = False,
+    now: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Capability-first, quota-aware model router for orchestration roles.
+
+    1. Hard-filters out unready/uninstalled engines or engines missing required capabilities.
+    2. Scores remaining candidates by role tier fit, quota urgency, and family diversity.
+    3. Explicitly records `degraded_reason` if a heterogeneous reviewer fallback was needed.
+    """
+    from . import agents, engines
+
+    cat = catalog if isinstance(catalog, dict) else engines.catalog()
+    req_caps = list(required_capabilities or [])
+    if role in ('planner', 'reviewer') and 'read_only_enforced' not in req_caps:
+        req_caps.append('read_only_enforced')
+    if role.startswith('coder_') and 'repo_write' not in req_caps:
+        req_caps.extend(['repo_read', 'repo_write'])
+    if has_images and 'vision' not in req_caps:
+        req_caps.append('vision')
+
+    if installed_engines is not None:
+        raw_candidates = [e for e in installed_engines if e and e != 'auto']
+    else:
+        raw_candidates = [
+            ag['id'] for ag in agents.list_all_agents()
+            if ag.get('enabled', True) and ag.get('installed')
+        ]
+        if not raw_candidates:
+            raw_candidates = ['codex', 'antigravity']
+
+    capable_engines: List[str] = []
+    for eng in raw_candidates:
+        caps = agents.get_engine_capabilities(eng)
+        if all(caps.get(c, False) for c in req_caps):
+            capable_engines.append(eng)
+
+    if not capable_engines:
+        raise RuntimeError(f'没有具备所需能力 ({", ".join(req_caps)}) 的可用引擎来执行角色 {role}')
+
+    desired_tier, default_effort = _ROLE_TARGET_TIER.get(role, ('balanced', 'medium'))
+    scored: List[Tuple[float, Dict[str, Any]]] = []
+    heterogeneous_found = False
+
+    for eng in capable_engines:
+        models_list = ((cat.get(eng) or {}).get('models')) or engines.engine_models(eng).get('models') or []
+        if not models_list:
+            continue
+        caps = agents.get_engine_capabilities(eng)
+        for idx, m_spec in enumerate(models_list):
+            mid = str(m_spec.get('id') or '')
+            if not mid:
+                continue
+            if has_images and not m_spec.get('supportsImage', True):
+                continue
+
+            q_prof = evaluate_quota_profile(eng, mid, quotas_snapshot, now=now)
+            if not q_prof['engine_ready'] or not q_prof['available']:
+                continue
+
+            family = infer_model_family(eng, mid)
+            is_same_family = bool(exclude_model_family and family == exclude_model_family)
+            is_same_engine = bool(exclude_engine and eng == exclude_engine)
+
+            if strict_heterogeneous and role == 'reviewer' and is_same_family:
+                continue
+
+            if role == 'reviewer' and not is_same_family:
+                heterogeneous_found = True
+
+            efforts = m_spec.get('efforts') or ['low', 'medium', 'high']
+            chosen_effort = default_effort if default_effort in efforts else (m_spec.get('defaultEffort') or efforts[0])
+            if q_prof['budget_state'] == 'scarce' and 'medium' in efforts and chosen_effort in ('high', 'xhigh', 'max'):
+                chosen_effort = 'medium'
+
+            model_tier = _classify_model_tier(eng, m_spec)
+            score = _tier_fit_score(model_tier, desired_tier) + q_prof['quota_score']
+
+            # Role-specific preferences
+            mid_l = mid.lower()
+            if role == 'planner':
+                if model_tier == 'flagship':
+                    score += 12.0
+            elif role == 'coder_frontend':
+                if m_spec.get('supportsImage', True):
+                    score += 4.0
+                if 'claude' in mid_l or 'argon' in mid_l or 'sol' in mid_l:
+                    score += 4.0
+            elif role == 'coder_fast':
+                if model_tier == 'fast':
+                    score += 15.0
+                elif model_tier == 'flagship':
+                    score -= 20.0
+            elif role == 'reviewer':
+                if not is_same_family:
+                    score += 30.0
+                elif not is_same_engine:
+                    score += 10.0
+                else:
+                    score -= 15.0
+
+            if m_spec.get('defaultEffort') == chosen_effort:
+                score += 6.0
+            if m_spec.get('isDefault'):
+                score += 1.0
+            score -= idx * 0.01
+
+            scored.append((score, {
+                'engine': eng,
+                'model': mid,
+                'model_name': m_spec.get('name') or mid,
+                'model_family': family,
+                'effort': chosen_effort,
+                'effort_label': _EFFORT_ZH.get(chosen_effort, chosen_effort),
+                'model_tier': model_tier,
+                'budget_state': q_prof['budget_state'],
+                'quota_summary': q_prof['quota_summary'],
+                'capabilities': caps,
+                'heterogeneous': not is_same_family,
+                'degraded_reason': '',
+                'score': round(score, 2),
+            }))
+
+    if not scored:
+        if strict_heterogeneous and role == 'reviewer':
+            raise RuntimeError('开启了强异构审查，但当前没有可用的异构模型家族候选')
+        raise RuntimeError(f'当前所有具备能力的引擎配额均已耗尽或不可用（角色: {role}）')
+
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    best = scored[0][1]
+    if role == 'reviewer' and exclude_model_family and not best['heterogeneous']:
+        best['degraded_reason'] = f'无可用异构模型家族（已回避 {exclude_model_family} 失败），已显式降级为同家族新会话独立审查'
+
+    eng_label = {'codex': 'Codex', 'antigravity': 'Antigravity'}.get(best['engine'], best['engine'])
+    best['reason'] = (
+        f"角色[{role}] · {best['quota_summary']} → "
+        f"{eng_label} · {best['model_name']} · {best['effort_label']}"
+    )
+    return best

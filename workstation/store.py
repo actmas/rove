@@ -454,6 +454,111 @@ def init():
                 updated REAL NOT NULL
             )
         ''')
+        db.executescript('''
+            CREATE TABLE IF NOT EXISTS orchestration_runs(
+                id TEXT PRIMARY KEY,
+                request_id TEXT UNIQUE NOT NULL,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                root_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                prompt TEXT NOT NULL,
+                strategy TEXT NOT NULL DEFAULT 'relay',
+                status TEXT NOT NULL DEFAULT 'planning',
+                plan_version INTEGER NOT NULL DEFAULT 1,
+                revision INTEGER NOT NULL DEFAULT 1,
+                policy_json TEXT NOT NULL DEFAULT '{}',
+                budget_json TEXT NOT NULL DEFAULT '{}',
+                baseline_ref TEXT NOT NULL DEFAULT '',
+                workspace_path TEXT NOT NULL DEFAULT '',
+                fix_rounds INTEGER NOT NULL DEFAULT 0,
+                total_attempts INTEGER NOT NULL DEFAULT 0,
+                plan_retries INTEGER NOT NULL DEFAULT 0,
+                lease_owner TEXT NOT NULL DEFAULT '',
+                lease_expires_at REAL NOT NULL DEFAULT 0,
+                generation INTEGER NOT NULL DEFAULT 1,
+                wait_reason TEXT NOT NULL DEFAULT '',
+                terminal_reason TEXT NOT NULL DEFAULT '',
+                created REAL NOT NULL,
+                updated REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_orch_runs_sess ON orchestration_runs(root_session_id, updated DESC);
+            CREATE INDEX IF NOT EXISTS idx_orch_runs_status ON orchestration_runs(status, updated DESC);
+
+            CREATE TABLE IF NOT EXISTS orchestration_steps(
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES orchestration_runs(id) ON DELETE CASCADE,
+                plan_version INTEGER NOT NULL DEFAULT 1,
+                step_index INTEGER NOT NULL DEFAULT 0,
+                logical_key TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                role TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                depends_on_json TEXT NOT NULL DEFAULT '[]',
+                files_scope_json TEXT NOT NULL DEFAULT '[]',
+                acceptance_json TEXT NOT NULL DEFAULT '[]',
+                required_capabilities_json TEXT NOT NULL DEFAULT '[]',
+                prompt TEXT NOT NULL DEFAULT '',
+                optional INTEGER NOT NULL DEFAULT 0,
+                preferred_engine TEXT,
+                preferred_model TEXT,
+                preferred_effort TEXT,
+                active_attempt_id TEXT,
+                sub_session_id TEXT,
+                created REAL NOT NULL,
+                updated REAL NOT NULL,
+                UNIQUE(run_id, plan_version, logical_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_orch_steps_run ON orchestration_steps(run_id, plan_version, step_index);
+
+            CREATE TABLE IF NOT EXISTS orchestration_attempts(
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES orchestration_runs(id) ON DELETE CASCADE,
+                step_id TEXT NOT NULL REFERENCES orchestration_steps(id) ON DELETE CASCADE,
+                attempt_no INTEGER NOT NULL DEFAULT 1,
+                job_id TEXT UNIQUE NOT NULL,
+                generation INTEGER NOT NULL DEFAULT 1,
+                engine TEXT NOT NULL,
+                model TEXT,
+                effort TEXT,
+                route_reason TEXT NOT NULL DEFAULT '',
+                capability_snapshot_json TEXT NOT NULL DEFAULT '{}',
+                input_digest TEXT NOT NULL DEFAULT '',
+                output_digest TEXT NOT NULL DEFAULT '',
+                started REAL NOT NULL,
+                ended REAL,
+                outcome TEXT,
+                error_class TEXT NOT NULL DEFAULT '',
+                error_message TEXT NOT NULL DEFAULT '',
+                UNIQUE(step_id, attempt_no)
+            );
+            CREATE INDEX IF NOT EXISTS idx_orch_attempts_run ON orchestration_attempts(run_id, started DESC);
+
+            CREATE TABLE IF NOT EXISTS orchestration_artifacts(
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES orchestration_runs(id) ON DELETE CASCADE,
+                step_id TEXT NOT NULL REFERENCES orchestration_steps(id) ON DELETE CASCADE,
+                attempt_id TEXT NOT NULL REFERENCES orchestration_attempts(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL,
+                location TEXT NOT NULL DEFAULT '',
+                content_hash TEXT NOT NULL DEFAULT '',
+                baseline_ref TEXT NOT NULL DEFAULT '',
+                summary TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                verified INTEGER NOT NULL DEFAULT 0,
+                created REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_orch_artifacts_run ON orchestration_artifacts(run_id, created ASC);
+
+            CREATE TABLE IF NOT EXISTS orchestration_dispatches(
+                attempt_id TEXT PRIMARY KEY REFERENCES orchestration_attempts(id) ON DELETE CASCADE,
+                run_id TEXT NOT NULL REFERENCES orchestration_runs(id) ON DELETE CASCADE,
+                job_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                generation INTEGER NOT NULL DEFAULT 1,
+                created REAL NOT NULL,
+                updated REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_orch_dispatches_status ON orchestration_dispatches(status, created ASC);
+        ''')
         _ensure_columns(db, 'sessions', {
             'execution_target': "TEXT NOT NULL DEFAULT 'local'",
             'cloud_environment': "TEXT NOT NULL DEFAULT ''",
@@ -485,6 +590,9 @@ def init():
             'external_stopped_marker': "TEXT NOT NULL DEFAULT ''",
             'pruned_through_seq': 'INTEGER NOT NULL DEFAULT 0',
             'queue_paused': 'INTEGER NOT NULL DEFAULT 0',
+            'orchestration': "TEXT NOT NULL DEFAULT 'off'",
+            'orch_role': 'TEXT',
+            'active_orch_run_id': 'TEXT',
         })
         _ensure_columns(db, 'projects', {
             'is_scratch': 'INTEGER NOT NULL DEFAULT 0',
@@ -502,6 +610,10 @@ def init():
             'fast': 'INTEGER NOT NULL DEFAULT 0',
             'images': "TEXT NOT NULL DEFAULT '[]'",
             'engine': 'TEXT',
+            'orch_run_id': 'TEXT',
+            'orch_step_id': 'TEXT',
+            'orch_attempt_id': 'TEXT',
+            'orch_generation': 'INTEGER',
         })
         db.execute('''
             UPDATE sessions

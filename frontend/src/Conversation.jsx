@@ -13,6 +13,7 @@ export {parseEvents} from './eventParser';
 import Composer from './Composer';
 import SessionQuota from './SessionQuota';
 import CloudTaskCard from './CloudTaskCard';
+import OrchestrationCard from './OrchestrationCard';
 import FilePreviewModal from './FilePreviewModal';
 import RichUiBlock from './RichUiBlock';
 import ReactMarkdown from 'react-markdown';
@@ -1032,6 +1033,8 @@ export default function Conversation({
   session, events, job, onLoadOlder, historyBusy, onSend, onStop, onSwitchAndRetry, error, onError, sending,
   projects, projectId, onProjectChange, engine, onEngineChange, engineState, catalog,
   model, onModelChange, effort, onEffortChange, mode, onModeChange, fast, onFastChange,
+  orchestration = 'off', onOrchestrationChange, orchestrationRuns = [], onOrchestrationUpdated,
+  onCompact,
   onOpenSettings, onInspectFile, composerInputRef,
   quotedRef, onClearQuote, onQuoteText, lastPrompt, onRevertJob,
   queue, queuePaused, supportsLiveSteer, onEnqueue, onUpdateQueue, onDeleteQueue, onToggleQueuePause,
@@ -1344,6 +1347,10 @@ export default function Conversation({
       onModeChange={onModeChange}
       fast={fast}
       onFastChange={onFastChange}
+      orchestration={orchestration}
+      onOrchestrationChange={onOrchestrationChange}
+      tokensUsed={session?.tokens_used || 0}
+      onCompact={onCompact}
       onOpenSettings={onOpenSettings}
       quotedRef={quotedRef}
       onClearQuote={onClearQuote}
@@ -1455,6 +1462,9 @@ export default function Conversation({
               {historyBusy ? '正在拉取更早历史…' : '从服务器加载更早快照'}
             </button>
           )}
+          {orchestrationRuns.slice(0, 2).map(run => (
+            <OrchestrationCard key={run.id} run={run} onRunUpdated={onOrchestrationUpdated}/>
+          ))}
           {visibleDisplayContent.map((m, idx) => {
             if (m.type === 'cloud_task') return <CloudTaskCard key={m.id} item={m}/>;
             if (m.type === 'user') {

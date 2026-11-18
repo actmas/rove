@@ -15,6 +15,7 @@ import {
   getSessionQueue, enqueueSessionMessage, updateQueuedMessage, cancelQueuedMessage,
   pauseSessionQueue, getHandoffPreview, getWorkstationDiagnostics,
   startArenaRun, getArenaStatus, adoptArenaWinner,
+  getSessionOrchestrations, compactSessionContext,
 } from './api';
 import {usePwaManager, clearAppBadgeSafe} from './pwa';
 import {deleteHistory} from './historyCache';
@@ -801,6 +802,38 @@ export default function App() {
     persistSessionPrefs({fast: nextFast});
   }
 
+  const [orchestration, setOrchestration] = useState('off');
+  const [orchestrationRuns, setOrchestrationRuns] = useState([]);
+
+  useEffect(() => {
+    setOrchestration(current?.orchestration || 'off');
+  }, [current?.id, current?.orchestration]);
+
+  function handleOrchestrationChange(nextOrch) {
+    setOrchestration(nextOrch);
+    persistSessionPrefs({orchestration: nextOrch});
+  }
+
+  const loadOrchestrations = useCallback(async () => {
+    if (!selected) {
+      setOrchestrationRuns([]);
+      return;
+    }
+    try {
+      const res = await getSessionOrchestrations(selected);
+      setOrchestrationRuns(res?.runs || []);
+    } catch {}
+  }, [selected]);
+
+  useEffect(() => {
+    loadOrchestrations();
+    if (!selected) return;
+    const hasActiveRun = orchestrationRuns.some(r => !['completed', 'failed', 'cancelled'].includes(r.status));
+    if (!hasActiveRun && orchestration === 'off') return;
+    const timer = setInterval(loadOrchestrations, 3000);
+    return () => clearInterval(timer);
+  }, [loadOrchestrations, selected, events.length, orchestration]);
+
   async function createSession() {
     const result = await post('sessions', {
       project_id: projectId,
@@ -838,8 +871,10 @@ export default function App() {
         effort: targetEffort,
         mode,
         fast,
+        orchestration: overrides.orchestration || orchestration,
         images: attachedImages.map(img => img.dataUrl),
       });
+      await loadOrchestrations();
       pendingRequest.current = null;
       if (text && text.trim()) setLastPrompt(text);
       setFailedOutbox(null);
@@ -1857,6 +1892,24 @@ export default function App() {
                 onModeChange={handleModeChange}
                 fast={fast}
                 onFastChange={handleFastChange}
+                orchestration={orchestration}
+                onCompact={selected ? async () => {
+                  try {
+                    await compactSessionContext(selected);
+                    await refresh();
+                  } catch (e) { setError(e.message || '上下文压缩失败'); }
+                } : null}
+                onOrchestrationChange={handleOrchestrationChange}
+                orchestrationRuns={orchestrationRuns}
+                onOrchestrationUpdated={updated => {
+                  setOrchestrationRuns(prev => {
+                    const idx = prev.findIndex(r => r.id === updated.id);
+                    if (idx === -1) return [updated, ...prev];
+                    const next = [...prev];
+                    next[idx] = updated;
+                    return next;
+                  });
+                }}
                 onOpenSettings={() => setSettings(true)}
                 onInspectFile={handleInspectFile}
                 composerInputRef={composerInputRef}

@@ -53,6 +53,9 @@ from . import model_router
 from . import webhooks
 from . import context_bridge
 from . import arena
+from . import orchestration_schema
+from . import orchestration_store
+from . import orchestrator
 
 try:
     import httpx
@@ -179,7 +182,9 @@ async def lifespan(app):
     await asyncio.to_thread(antigravity_sync.sync_antigravity_projects_and_sessions, True)
     awake = await asyncio.create_subprocess_exec('/usr/bin/caffeinate', '-i', '-w', str(os.getpid())) if sys.platform == 'darwin' else None
     for job in db.query("SELECT id FROM jobs WHERE status='queued'"):
-        spawn('workstation.worker', job['id'])
+        if not job.get('orch_run_id'):
+            spawn('workstation.worker', job['id'])
+    await asyncio.to_thread(orchestrator.recover_pending_dispatches)
     maint_task = asyncio.create_task(_background_retention_loop())
     quota_task = asyncio.create_task(_background_quota_wait_loop())
     yield
@@ -906,6 +911,7 @@ class SessionPatch(BaseModel):
     mode: ModeType | None = None
     fast: bool | None = None
     account_id: str | None = Field(default=None, max_length=64)
+    orchestration: Literal['off', 'relay', 'parallel', 'auto'] | None = None
     generation: int | None = None
     defer_if_busy: bool = False
 
@@ -941,6 +947,9 @@ async def update_session(ident: str, body: SessionPatch):
     if 'account_id' in fields:
         updates.append('account_id=?')
         params.append(body.account_id or None)
+    if 'orchestration' in fields and body.orchestration is not None:
+        updates.append('orchestration=?')
+        params.append(orchestration_schema.normalize_strategy(body.orchestration))
     if 'title' in fields and body.title is not None:
         cleaned = body.title.strip()
         if not cleaned:
@@ -1083,6 +1092,7 @@ class Prompt(BaseModel):
     fast: bool | None = None
     images: list[str] = Field(default_factory=list, max_length=4)
     use_worktree: bool | None = None
+    orchestration: Literal['off', 'relay', 'parallel', 'auto'] | None = None
     execution_target: Literal['local', 'cloud'] = 'local'
     cloud_environment: str = Field(default='', max_length=200)
 
@@ -1158,6 +1168,33 @@ async def send_message(ident: str, body: Prompt):
     req_effort = body.effort if body.effort is not None else s.get('effort')
     chosen_mode = body.mode if body.mode is not None else (s.get('mode') or 'standard')
     req_fast = bool(body.fast if body.fast is not None else bool(s.get('fast')))
+
+    eff_orch = orchestration_schema.normalize_strategy(
+        body.orchestration if body.orchestration is not None else s.get('orchestration')
+    )
+    if body.execution_target != 'cloud' and orchestrator.should_orchestrate(
+        prompt_text, eff_orch, chosen_mode, bool(body.images)
+    ):
+        if s.get('active_orch_run_id'):
+            active_run = orchestration_store.get_run(s['active_orch_run_id'])
+            if active_run and active_run['status'] not in orchestration_schema.RUN_TERMINAL_STATES:
+                raise HTTPException(409, '当前会话已有正在运行的协同编排任务，请等待完成或先暂停/停止')
+        p = project(s['project_id'])
+        try:
+            run_summary = await asyncio.to_thread(
+                orchestrator.start_orchestration,
+                s,
+                p,
+                prompt_text,
+                strategy=eff_orch,
+                mode=chosen_mode,
+                request_id=body.request_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {'orchestrated': True, 'run': run_summary, 'session_id': ident}
 
     if body.execution_target == 'cloud':
         if req_engine not in ('codex', 'auto'):
@@ -2152,6 +2189,74 @@ async def session_handoff_preview(ident: str, target_engine: str, target_model: 
     return await asyncio.to_thread(
         context_bridge.inspect_handoff_context, s, p, target_engine, target_model
     )
+
+
+@app.post('/api/sessions/{ident}/compact')
+async def compact_session_context(ident: str):
+    """Archive native context window and reset native IDs so the next turn starts fresh with handoff summary."""
+    s = session(ident)
+    active = db.one("SELECT 1 FROM jobs WHERE session_id=? AND status IN ('queued','running','waiting') LIMIT 1", (ident,))
+    if active:
+        raise HTTPException(409, '当前会话有任务正在运行，请先等待完成或停止后再压缩上下文')
+    db.execute(
+        'UPDATE sessions SET native_id=NULL, native_codex_id=NULL, native_antigravity_id=NULL, tokens_used=0, updated=? WHERE id=?',
+        (time.time(), ident),
+    )
+    db.event(
+        ident,
+        None,
+        'notice',
+        {'text': '🗜️【主动上下文压缩 /compact】已归档旧原生上下文窗口并重置 Token 水位，下一条指令将携带结构化交接摘要在全新窗口中继续。'},
+    )
+    return {'ok': True, 'session_id': ident}
+
+
+def _scan_project_commands(project_path: str) -> list[dict]:
+    builtins = [
+        {'name': 'review', 'description': '在隔离只读会话启动独立 /review 代码复核', 'source': 'builtin', 'action': 'prefix', 'value': '/review '},
+        {'name': 'plan', 'description': '切换为只读规划模式，仅分析方案不改代码', 'source': 'builtin', 'action': 'mode', 'value': 'plan'},
+        {'name': 'compact', 'description': '主动归档旧上下文窗口并重置 Token 水位', 'source': 'builtin', 'action': 'compact', 'value': ''},
+        {'name': 'commit', 'description': '检查当前 git diff 并生成规范 commit message 后提交', 'source': 'builtin', 'action': 'prompt', 'value': '请检查当前 git diff 并生成规范的 commit message 后提交变更。'},
+        {'name': 'test', 'description': '运行项目测试套件并汇报结果，若有失败请定位原因', 'source': 'builtin', 'action': 'prompt', 'value': '请运行项目测试套件并汇报结果，如有失败请定位并分析原因。'},
+    ]
+    custom: list[dict] = []
+    root = Path(project_path)
+    for rel_dir, src in (('.agent/workflows', 'workflow'), ('.claude/commands', 'claude')):
+        cmd_dir = root / rel_dir
+        if not cmd_dir.is_dir():
+            continue
+        for md in sorted(cmd_dir.glob('*.md'))[:30]:
+            try:
+                raw = md.read_text(encoding='utf-8', errors='replace')[:8000]
+            except OSError:
+                continue
+            desc = ''
+            body = raw.strip()
+            if raw.startswith('---'):
+                parts = raw.split('---', 2)
+                if len(parts) == 3:
+                    for line in parts[1].splitlines():
+                        if line.strip().lower().startswith('description:'):
+                            desc = line.split(':', 1)[1].strip().strip('"\'')
+                            break
+                    body = parts[2].strip()
+            if not desc:
+                first_line = next((ln.lstrip('# ').strip() for ln in body.splitlines() if ln.strip()), '')
+                desc = first_line[:60] or f'{src} 自定义指令'
+            custom.append({
+                'name': md.stem,
+                'description': desc,
+                'source': src,
+                'action': 'prompt',
+                'value': body,
+            })
+    return builtins + custom
+
+
+@app.get('/api/projects/{ident}/commands')
+async def list_project_commands(ident: str):
+    p = project(ident)
+    return {'commands': await asyncio.to_thread(_scan_project_commands, p['path'])}
 
 
 @app.get('/api/diagnostics')
@@ -3171,6 +3276,88 @@ async def api_arena_adopt(arena_id: str, body: ArenaAdoptBody):
         return await asyncio.to_thread(arena.adopt_arena_winner, arena_id, body.winner_session_id)
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+class OrchestrationCreateBody(BaseModel):
+    prompt: str = Field(min_length=1, max_length=64000)
+    request_id: str = Field(min_length=8, max_length=120)
+    strategy: Literal['relay', 'parallel', 'auto'] = 'relay'
+    mode: ModeType = 'standard'
+    budget: dict | None = None
+    policy: dict | None = None
+
+
+class OrchestrationActionBody(BaseModel):
+    action: Literal['pause', 'resume', 'cancel', 'skip_optional', 'change_model']
+    expected_revision: int = Field(ge=1)
+    request_id: str | None = Field(default=None, max_length=120)
+    step_id: str | None = Field(default=None, max_length=80)
+    engine: str | None = Field(default=None, max_length=48)
+    model: str | None = Field(default=None, max_length=120)
+    effort: str | None = Field(default=None, max_length=24)
+
+
+@app.post('/api/sessions/{ident}/orchestrations', status_code=201)
+async def api_create_orchestration(ident: str, body: OrchestrationCreateBody):
+    s = session(ident)
+    p = project(s['project_id'])
+    try:
+        return await asyncio.to_thread(
+            orchestrator.start_orchestration,
+            s,
+            p,
+            body.prompt,
+            strategy=body.strategy,
+            mode=body.mode,
+            request_id=body.request_id,
+            budget_overrides=body.budget,
+            policy_overrides=body.policy,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get('/api/sessions/{ident}/orchestrations')
+async def api_list_session_orchestrations(ident: str):
+    session(ident)
+    runs = await asyncio.to_thread(orchestration_store.list_session_runs, ident)
+    return {'session_id': ident, 'runs': runs}
+
+
+@app.get('/api/orchestrations/{run_id}')
+async def api_get_orchestration(run_id: str):
+    run = orchestration_store.get_run(run_id)
+    if not run:
+        raise HTTPException(404, '未找到协同编排任务')
+    session(run['root_session_id'])
+    return await asyncio.to_thread(orchestration_store.enrich_run_summary, run)
+
+
+@app.post('/api/orchestrations/{run_id}/actions')
+async def api_act_orchestration(run_id: str, body: OrchestrationActionBody):
+    run = orchestration_store.get_run(run_id)
+    if not run:
+        raise HTTPException(404, '未找到协同编排任务')
+    session(run['root_session_id'])
+    try:
+        return await asyncio.to_thread(
+            orchestrator.handle_run_action,
+            run_id,
+            body.action,
+            body.expected_revision,
+            {
+                'step_id': body.step_id,
+                'engine': body.engine,
+                'model': body.model,
+                'effort': body.effort,
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
 

@@ -468,11 +468,35 @@ export function getArenaStatus(arenaId) {
   return api(`arena/${encodeURIComponent(arenaId)}`);
 }
 
+export function startOrchestration(sessionId, payload) {
+  return post(`sessions/${encodeURIComponent(sessionId)}/orchestrations`, payload);
+}
+
+export function getSessionOrchestrations(sessionId) {
+  return api(`sessions/${encodeURIComponent(sessionId)}/orchestrations`);
+}
+
+export function getOrchestration(runId) {
+  return api(`orchestrations/${encodeURIComponent(runId)}`);
+}
+
+export function actOrchestration(runId, payload) {
+  return post(`orchestrations/${encodeURIComponent(runId)}/actions`, payload);
+}
+
 export function adoptArenaWinner(arenaId, winnerSessionId) {
   return post(`arena/${encodeURIComponent(arenaId)}/adopt`, {winner_session_id: winnerSessionId});
 }
 
 export function previewAutoSelect(payload) {
   return post('models/auto-select', payload);
+}
+
+export function getProjectCommands(projectId) {
+  return api(`projects/${encodeURIComponent(projectId)}/commands`);
+}
+
+export function compactSessionContext(sessionId) {
+  return post(`sessions/${encodeURIComponent(sessionId)}/compact`, {});
 }
 
