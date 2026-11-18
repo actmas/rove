@@ -460,9 +460,14 @@ const UserMessageItem = memo(function UserMessageItem({
     <article className="message user question-card" id={`msg-${m.id}`}>
       <div className="speaker question-header">
         <IconTile icon={User} tone="blue" size={13}/>
-        {(m.execution_target === 'cloud' || modelName || m.effort || (m.mode && m.mode !== 'standard') || m.fast) && (
+        {(m.execution_target === 'cloud' || modelName || m.effort || m.auto_routed || (m.mode && m.mode !== 'standard') || m.fast) && (
           <div className="user-meta-chips">
             {m.execution_target === 'cloud' && <span className="meta-chip">云端</span>}
+            {m.auto_routed && (
+              <span className="meta-chip auto-route-chip" title={m.route_reason || '智能匹配模型与思考强度'}>
+                <Sparkles size={10}/>智能
+              </span>
+            )}
             {modelName && <span className="meta-chip">{modelName}</span>}
             {m.effort && <span className="meta-chip">{effortBadge[m.effort] || m.effort}</span>}
             {m.fast && <span className="meta-chip fast-chip"><Zap size={10}/>极速</span>}
@@ -1364,7 +1369,7 @@ export default function Conversation({
               <span className="dot"/>
               <span>{currentProject?.name || '工作区'}</span>
               <span>·</span>
-              <span>{activeModelObj?.name || (engine === 'antigravity' ? 'Antigravity' : 'Codex')}</span>
+              <span>{(engine === 'auto' || model === 'auto') ? '✨ 自动选模' : (activeModelObj?.name || (engine === 'antigravity' ? 'Antigravity' : 'Codex'))}</span>
               <span>·</span>
               <span>{effortBadge[effort] || effort}</span>
             </div>

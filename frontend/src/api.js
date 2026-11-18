@@ -238,6 +238,7 @@ export const statusText = {
 export const activeStates = new Set(['queued', 'running', 'waiting']);
 
 export const effortBadge = {
+  auto: '自动强度',
   low: '极速 Low',
   medium: '均衡 Med',
   high: '深入 High',
@@ -469,5 +470,9 @@ export function getArenaStatus(arenaId) {
 
 export function adoptArenaWinner(arenaId, winnerSessionId) {
   return post(`arena/${encodeURIComponent(arenaId)}/adopt`, {winner_session_id: winnerSessionId});
+}
+
+export function previewAutoSelect(payload) {
+  return post('models/auto-select', payload);
 }
 

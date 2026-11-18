@@ -65,7 +65,7 @@ UPLOAD_NAME_RE = re.compile(r'^[a-f0-9]{16,32}\.(png|jpg|webp|gif)$')
 DATA_URL_RE = re.compile(r'^data:image/(png|jpeg|jpg|webp|gif);base64,([A-Za-z0-9+/=\s]+)$')
 SKIP_DIRS = {'node_modules', '__pycache__', 'dist', 'build', 'target', 'venv'}
 
-EffortType = Literal['low', 'medium', 'high', 'xhigh', 'max', 'ultra']
+EffortType = Literal['auto', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']
 ModeType = Literal['standard', 'plan', 'auto', 'accept-edits', 'full']
 EngineType = str
 
@@ -833,7 +833,7 @@ async def new_session(body: NewSession):
     else:
         project(body.project_id)
         proj_id = body.project_id
-    if not agents.is_valid_engine(body.engine):
+    if body.engine != 'auto' and not agents.is_valid_engine(body.engine):
         raise HTTPException(400, f'未知或未启用的 Agent 引擎：{body.engine}')
     model = clean_model(body.model)
     ident, now = secrets.token_hex(12), time.time()
@@ -954,18 +954,22 @@ async def update_session(ident: str, body: SessionPatch):
     if 'pinned' in fields and body.pinned is not None:
         updates.append('pinned=?')
         params.append(int(body.pinned))
-    if 'engine' in fields and body.engine and agents.is_valid_engine(body.engine):
-        orig_codex_id = db.get_codex_native_id(current)
-        orig_agy_id = db.get_antigravity_native_id(current)
-        target_nid = agents.get_session_native_agent_id(current, body.engine)
-        updates.extend(['engine=?', 'native_id=?', 'native_codex_id=?', 'native_antigravity_id=?'])
-        params.extend([body.engine, target_nid, orig_codex_id, orig_agy_id])
-    next_engine = body.engine if ('engine' in fields and body.engine and agents.is_valid_engine(body.engine)) else current['engine']
+    if 'engine' in fields and body.engine:
+        if body.engine == 'auto':
+            updates.append('engine=?')
+            params.append('auto')
+        elif agents.is_valid_engine(body.engine):
+            orig_codex_id = db.get_codex_native_id(current)
+            orig_agy_id = db.get_antigravity_native_id(current)
+            target_nid = agents.get_session_native_agent_id(current, body.engine)
+            updates.extend(['engine=?', 'native_id=?', 'native_codex_id=?', 'native_antigravity_id=?'])
+            params.extend([body.engine, target_nid, orig_codex_id, orig_agy_id])
+    next_engine = body.engine if ('engine' in fields and body.engine and (body.engine == 'auto' or agents.is_valid_engine(body.engine))) else current['engine']
     if 'model' in fields or 'engine' in fields:
         quota_wait.cancel_quota_wait(current['id'], reason='model_or_engine_switched')
         wanted_model = clean_model(body.model) if 'model' in fields else current.get('model')
         wanted_effort = body.effort if 'effort' in fields else current.get('effort')
-        resolved_model, resolved_effort = engines.resolve_model(next_engine, wanted_model, wanted_effort)
+        resolved_model, resolved_effort = engines.resolve_model(next_engine, wanted_model, wanted_effort, allow_auto=True)
         updates.append('model=?')
         params.append(resolved_model)
         if 'effort' in fields or resolved_effort != current.get('effort'):
@@ -1083,6 +1087,58 @@ class Prompt(BaseModel):
     cloud_environment: str = Field(default='', max_length=200)
 
 
+async def _resolve_auto_params(
+    *,
+    prompt_text: str,
+    mode: str,
+    has_images: bool,
+    req_engine: str,
+    req_model: str | None,
+    req_effort: str | None,
+    req_fast: bool,
+    preferred_engine: str | None = None,
+    allow_quota_fetch: bool = False,
+) -> tuple[str, str | None, str | None, int, dict | None]:
+    """Resolve 'auto' engine/model/effort preferences into concrete execution choices."""
+    needs_auto = (req_engine == 'auto' or req_model == 'auto' or req_effort == 'auto')
+    if not needs_auto:
+        chosen_engine = req_engine if req_engine and req_engine != 'auto' else 'codex'
+        chosen_model, chosen_effort = engines.resolve_model(chosen_engine, req_model, req_effort, allow_auto=False)
+        return chosen_engine, chosen_model, chosen_effort, int(bool(req_fast)), None
+
+    q_snap = quotas.get_cached_quotas() if hasattr(quotas, 'get_cached_quotas') else None
+    if allow_quota_fetch and not q_snap:
+        with contextlib.suppress(Exception):
+            q_snap = await asyncio.wait_for(quotas.get_all_quotas(force=False), timeout=2.5)
+
+    installed: list[str] | None = None
+    if req_engine == 'auto':
+        cand_list = [e for e in ('codex', 'antigravity') if agents.is_agent_installed(e)]
+        for ag in agents.list_all_agents():
+            if not ag.get('builtin') and ag.get('enabled', True) and ag.get('installed'):
+                cand_list.append(ag['id'])
+        if cand_list:
+            installed = cand_list
+
+    route_info = model_router.auto_select_model_and_effort(
+        prompt=prompt_text,
+        mode=mode,
+        has_images=has_images,
+        requested_engine=req_engine,
+        requested_model=req_model,
+        requested_effort=req_effort,
+        requested_fast=req_fast,
+        quotas_snapshot=q_snap,
+        installed_engines=installed,
+        preferred_engine=preferred_engine,
+    )
+    chosen_engine = route_info['engine']
+    chosen_model, chosen_effort = engines.resolve_model(
+        chosen_engine, route_info.get('model'), route_info.get('effort'), allow_auto=False
+    )
+    return chosen_engine, chosen_model, chosen_effort, int(bool(route_info.get('fast'))), route_info
+
+
 @app.post('/api/sessions/{ident}/messages')
 async def send_message(ident: str, body: Prompt):
     s = session(ident)
@@ -1093,26 +1149,45 @@ async def send_message(ident: str, body: Prompt):
             prompt_text = '请结合附加图片分析并处理。'
         else:
             raise HTTPException(400, '任务内容不能为空')
-    chosen_engine = body.engine if (body.engine and agents.is_valid_engine(body.engine)) else s.get('engine', 'codex')
+    req_engine = (
+        body.engine
+        if (body.engine and (body.engine == 'auto' or agents.is_valid_engine(body.engine)))
+        else (s.get('engine') or 'codex')
+    )
+    req_model = clean_model(body.model) if body.model is not None else s.get('model')
+    req_effort = body.effort if body.effort is not None else s.get('effort')
+    chosen_mode = body.mode if body.mode is not None else (s.get('mode') or 'standard')
+    req_fast = bool(body.fast if body.fast is not None else bool(s.get('fast')))
+
     if body.execution_target == 'cloud':
-        if chosen_engine != 'codex':
+        if req_engine not in ('codex', 'auto'):
             raise HTTPException(400, '此 Agent 请通过已配置的云端入口打开')
         if not re.fullmatch(r'[A-Za-z0-9_-]{1,200}', body.cloud_environment):
             raise HTTPException(400, '请填写有效的 Codex 云端环境 ID')
         if body.images:
             raise HTTPException(400, '当前 Codex 云端提交入口暂不支持图片，请使用文字任务')
+        chosen_engine, chosen_model, chosen_effort, chosen_fast, route_info = 'codex', None, None, 0, None
+        chosen_mode = 'standard'
+    else:
+        pref_engine = s.get('last_engine') or (s.get('engine') if s.get('engine') != 'auto' else None)
+        chosen_engine, chosen_model, chosen_effort, chosen_fast, route_info = await _resolve_auto_params(
+            prompt_text=prompt_text,
+            mode=chosen_mode,
+            has_images=bool(body.images),
+            req_engine=req_engine,
+            req_model=req_model,
+            req_effort=req_effort,
+            req_fast=req_fast,
+            preferred_engine=pref_engine,
+            allow_quota_fetch=True,
+        )
+
     if not agents.is_agent_installed(chosen_engine):
         raise HTTPException(409, f'{chosen_engine} 尚未安装或未配置可执行路径')
 
-    chosen_model = clean_model(body.model) if body.model is not None else s.get('model')
-    chosen_effort = body.effort if body.effort is not None else s.get('effort')
-    # Never run an engine with another engine's model (e.g. a GPT id left over on an Antigravity relay session).
-    chosen_model, chosen_effort = engines.resolve_model(chosen_engine, chosen_model, chosen_effort)
-    chosen_mode = body.mode if body.mode is not None else (s.get('mode') or 'standard')
-    chosen_fast = int(body.fast if body.fast is not None else bool(s.get('fast')))
-
-    if body.execution_target == 'cloud':
-        chosen_model, chosen_effort, chosen_mode, chosen_fast = None, None, 'standard', 0
+    persisted_engine = 'auto' if req_engine == 'auto' else chosen_engine
+    persisted_model = 'auto' if req_model == 'auto' else chosen_model
+    persisted_effort = 'auto' if req_effort == 'auto' else chosen_effort
 
     existing = db.one('SELECT * FROM jobs WHERE request_id=?', (body.request_id,))
     if existing:
@@ -1173,7 +1248,7 @@ async def send_message(ident: str, body: Prompt):
             target_nid = agents.get_session_native_agent_id(s, chosen_engine)
             conn.execute(
                 "UPDATE sessions SET engine=?,native_id=?,native_codex_id=COALESCE(native_codex_id,?),native_antigravity_id=COALESCE(native_antigravity_id,?),updated=?,model=?,effort=?,mode=?,fast=?,title=CASE WHEN title='新会话' THEN ? ELSE title END WHERE id=?",
-                (chosen_engine, target_nid, native_codex_id, native_agy_id, now, chosen_model, chosen_effort, chosen_mode, chosen_fast, prompt_text.strip()[:40], ident),
+                (persisted_engine, target_nid, native_codex_id, native_agy_id, now, persisted_model, persisted_effort, chosen_mode, chosen_fast, prompt_text.strip()[:40], ident),
             )
             user_payload = {
                 'text': prompt_text,
@@ -1185,6 +1260,10 @@ async def send_message(ident: str, body: Prompt):
                 'fast': bool(chosen_fast),
                 'images': saved_images,
             }
+            if route_info:
+                user_payload['auto_routed'] = True
+                user_payload['route_reason'] = route_info.get('reason') or ''
+                user_payload['budget_state'] = route_info.get('budget_state') or ''
             conn.execute('INSERT INTO events(session_id,job_id,kind,payload,created) VALUES(?,?,?,?,?)',
                          (ident, job_id, 'user', json.dumps(user_payload, ensure_ascii=False), now))
         spawn('workstation.worker', job_id)
@@ -1851,6 +1930,17 @@ class ModelRouteBody(BaseModel):
     has_images: bool = False
 
 
+class ModelAutoSelectBody(BaseModel):
+    prompt: str = Field(default='', max_length=64000)
+    mode: str = Field(default='standard', max_length=40)
+    has_images: bool = False
+    engine: str = Field(default='auto', max_length=60)
+    model: str | None = Field(default='auto', max_length=120)
+    effort: str | None = Field(default='auto', max_length=40)
+    fast: bool = False
+    preferred_engine: str | None = Field(default=None, max_length=60)
+
+
 @app.post('/api/models/route')
 async def route_model_group(body: ModelRouteBody):
     q_snap = quotas.get_cached_quotas() if hasattr(quotas, 'get_cached_quotas') else None
@@ -1858,6 +1948,31 @@ async def route_model_group(body: ModelRouteBody):
         body.candidates, quotas_snapshot=q_snap, has_images=body.has_images
     )
     return {'selected': ranked[0] if ranked else None, 'ranked': ranked}
+
+
+@app.post('/api/models/auto-select')
+async def preview_auto_select(body: ModelAutoSelectBody):
+    q_snap = quotas.get_cached_quotas() if hasattr(quotas, 'get_cached_quotas') else None
+    installed = None
+    if body.engine == 'auto':
+        cand_list = [e for e in ('codex', 'antigravity') if agents.is_agent_installed(e)]
+        for ag in agents.list_all_agents():
+            if not ag.get('builtin') and ag.get('enabled', True) and ag.get('installed'):
+                cand_list.append(ag['id'])
+        if cand_list:
+            installed = cand_list
+    return model_router.auto_select_model_and_effort(
+        prompt=body.prompt,
+        mode=body.mode,
+        has_images=body.has_images,
+        requested_engine=body.engine or 'auto',
+        requested_model=body.model,
+        requested_effort=body.effort,
+        requested_fast=body.fast,
+        quotas_snapshot=q_snap,
+        installed_engines=installed,
+        preferred_engine=body.preferred_engine,
+    )
 
 
 class AccountCreateBody(BaseModel):
@@ -1931,6 +2046,7 @@ async def delete_subscription_account(ident: str, purge_dir: bool = True):
 class QueueItemBody(BaseModel):
     text: str = Field(min_length=1, max_length=50000)
     steer: bool = False
+    engine: str | None = None
     model: str | None = None
     effort: str | None = None
     mode: str | None = None
@@ -1979,10 +2095,21 @@ async def pause_or_resume_session_queue(ident: str, body: QueuePauseBody):
             if nxt:
                 next_job_id = secrets.token_hex(12)
                 now_ts = time.time()
-                eff_model = nxt.get('model') or s.get('model')
-                eff_effort = nxt.get('effort') or s.get('effort')
+                raw_engine = nxt.get('engine') or s.get('engine') or 'codex'
+                raw_model = nxt.get('model') or s.get('model')
+                raw_effort = nxt.get('effort') or s.get('effort')
                 eff_mode = nxt.get('mode') or s.get('mode') or 'standard'
-                eff_fast = int(bool(nxt['fast'] if nxt.get('fast') is not None else s.get('fast')))
+                raw_fast = bool(nxt['fast'] if nxt.get('fast') is not None else s.get('fast'))
+                eff_engine, eff_model, eff_effort, eff_fast, route_info = await _resolve_auto_params(
+                    prompt_text=nxt['prompt'],
+                    mode=eff_mode,
+                    has_images=bool(nxt.get('images') and nxt.get('images') != '[]'),
+                    req_engine=raw_engine,
+                    req_model=raw_model,
+                    req_effort=raw_effort,
+                    req_fast=raw_fast,
+                    preferred_engine=s.get('last_engine') or (s.get('engine') if s.get('engine') != 'auto' else None),
+                )
                 with db.transaction() as conn:
                     claimed = conn.execute(
                         "UPDATE session_queue SET status='dispatched', updated=? WHERE id=? AND status='pending'",
@@ -1990,16 +2117,27 @@ async def pause_or_resume_session_queue(ident: str, body: QueuePauseBody):
                     )
                     if claimed.rowcount:
                         conn.execute(
-                            'INSERT INTO jobs(id,session_id,request_id,prompt,status,started,model,effort,mode,fast,images) '
-                            'VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                            'INSERT INTO jobs(id,session_id,request_id,prompt,status,started,model,effort,mode,fast,images,engine) '
+                            'VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
                             (
                                 next_job_id, ident, f"q-{nxt['id']}", nxt['prompt'], 'queued', now_ts,
-                                eff_model, eff_effort, eff_mode, eff_fast, nxt.get('images') or '[]',
+                                eff_model, eff_effort, eff_mode, eff_fast, nxt.get('images') or '[]', eff_engine,
                             ),
                         )
+                        q_payload = {
+                            'text': nxt['prompt'],
+                            'engine': eff_engine,
+                            'model': eff_model,
+                            'effort': eff_effort,
+                            'mode': eff_mode,
+                            'queued': True,
+                        }
+                        if route_info:
+                            q_payload['auto_routed'] = True
+                            q_payload['route_reason'] = route_info.get('reason') or ''
                         conn.execute(
                             'INSERT INTO events(session_id,job_id,kind,payload,created) VALUES(?,?,?,?,?)',
-                            (ident, next_job_id, 'user', json.dumps({'text': nxt['prompt'], 'queued': True}, ensure_ascii=False), now_ts),
+                            (ident, next_job_id, 'user', json.dumps(q_payload, ensure_ascii=False), now_ts),
                         )
                         dispatched_job_id = next_job_id
                 if dispatched_job_id:
@@ -2070,7 +2208,7 @@ async def enqueue_session_message(ident: str, body: QueueItemBody):
         'INSERT INTO session_queue(id,session_id,prompt,engine,model,effort,mode,fast,images,steer,status,created,updated) '
         'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
         (
-            qid, ident, body.text.strip(), s.get('engine'),
+            qid, ident, body.text.strip(), body.engine or s.get('engine'),
             body.model or s.get('model'), body.effort or s.get('effort'),
             body.mode or s.get('mode'), int(body.fast if body.fast is not None else bool(s.get('fast'))),
             '[]', 1 if body.steer else 0, 'pending', now, now,

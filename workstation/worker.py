@@ -23,6 +23,7 @@ from . import account_pool
 from . import context_bridge
 from . import input_handoff
 from . import loop_guard
+from . import model_router
 from . import quota_wait
 from . import quotas
 from . import review
@@ -501,13 +502,54 @@ async def run(ident):
             if ckpt_ref:
                 db.execute('UPDATE jobs SET checkpoint_ref=? WHERE id=?', (ckpt_ref, ident))
                 job['checkpoint_ref'] = ckpt_ref
-    active_engine = job.get('engine') or session.get('engine') or 'codex'
+    raw_engine = job.get('engine') or session.get('engine') or 'codex'
+    raw_model = job.get('model') or session.get('model')
+    raw_effort = job.get('effort') or session.get('effort')
+    raw_mode = job.get('mode') or session.get('mode') or 'standard'
+    raw_fast = bool(job.get('fast') if job.get('fast') is not None else session.get('fast'))
+    if job.get('execution_target') != 'cloud' and (
+        raw_engine == 'auto' or raw_model == 'auto' or raw_effort == 'auto'
+    ):
+        q_snap = quotas.get_cached_quotas() if hasattr(quotas, 'get_cached_quotas') else None
+        cand_engines = None
+        if raw_engine == 'auto':
+            cand = [e for e in ('codex', 'antigravity') if agents.is_agent_installed(e)]
+            if cand:
+                cand_engines = cand
+        route_res = model_router.auto_select_model_and_effort(
+            prompt=job.get('prompt') or '',
+            mode=raw_mode,
+            has_images=bool(_session_images(session['id'], job.get('images'))),
+            requested_engine=raw_engine,
+            requested_model=raw_model,
+            requested_effort=raw_effort,
+            requested_fast=raw_fast,
+            quotas_snapshot=q_snap,
+            installed_engines=cand_engines,
+            preferred_engine=session.get('last_engine') or (session.get('engine') if session.get('engine') != 'auto' else None),
+        )
+        active_engine = route_res['engine']
+        resolved_model, resolved_effort = engines.resolve_model(
+            active_engine, route_res.get('model'), route_res.get('effort'), allow_auto=False
+        )
+        resolved_fast = int(bool(route_res.get('fast')))
+        job = dict(job)
+        job['engine'] = active_engine
+        job['model'] = resolved_model
+        job['effort'] = resolved_effort
+        job['fast'] = resolved_fast
+        db.execute(
+            'UPDATE jobs SET engine=?, model=?, effort=?, fast=? WHERE id=?',
+            (active_engine, resolved_model, resolved_effort, resolved_fast, ident),
+        )
+    else:
+        active_engine = raw_engine
     db.event(session['id'], ident, 'job_status', {
         'status': 'running',
         'engine': active_engine,
         'model': None if job.get('execution_target') == 'cloud' else engines.resolve_model(active_engine, job.get('model') or session.get('model'), None)[0],
         'effort': job.get('effort') or session.get('effort'),
-        'mode': job.get('mode') or session.get('mode') or 'standard',
+        'mode': raw_mode,
         'fast': bool(job.get('fast')),
     })
     try:
@@ -639,10 +681,34 @@ async def run(ident):
                 next_job_id = os.urandom(12).hex()
                 now_ts = time.time()
                 eff_sess = fresh_sess or session
-                eff_model = nxt.get('model') or eff_sess.get('model')
-                eff_effort = nxt.get('effort') or eff_sess.get('effort')
+                raw_q_engine = nxt.get('engine') or eff_sess.get('engine') or 'codex'
+                raw_q_model = nxt.get('model') or eff_sess.get('model')
+                raw_q_effort = nxt.get('effort') or eff_sess.get('effort')
                 eff_mode = nxt.get('mode') or eff_sess.get('mode') or 'standard'
-                eff_fast = int(bool(nxt['fast'] if nxt.get('fast') is not None else eff_sess.get('fast')))
+                raw_q_fast = bool(nxt['fast'] if nxt.get('fast') is not None else eff_sess.get('fast'))
+                route_q = None
+                if raw_q_engine == 'auto' or raw_q_model == 'auto' or raw_q_effort == 'auto':
+                    q_snap = quotas.get_cached_quotas() if hasattr(quotas, 'get_cached_quotas') else None
+                    cand_eng = [e for e in ('codex', 'antigravity') if agents.is_agent_installed(e)] if raw_q_engine == 'auto' else None
+                    route_q = model_router.auto_select_model_and_effort(
+                        prompt=nxt['prompt'],
+                        mode=eff_mode,
+                        has_images=bool(nxt.get('images') and nxt.get('images') != '[]'),
+                        requested_engine=raw_q_engine,
+                        requested_model=raw_q_model,
+                        requested_effort=raw_q_effort,
+                        requested_fast=raw_q_fast,
+                        quotas_snapshot=q_snap,
+                        installed_engines=cand_eng or None,
+                        preferred_engine=eff_sess.get('last_engine') or (eff_sess.get('engine') if eff_sess.get('engine') != 'auto' else None),
+                    )
+                    eff_engine = route_q['engine']
+                    eff_model, eff_effort = engines.resolve_model(eff_engine, route_q.get('model'), route_q.get('effort'), allow_auto=False)
+                    eff_fast = int(bool(route_q.get('fast')))
+                else:
+                    eff_engine = raw_q_engine
+                    eff_model, eff_effort = engines.resolve_model(eff_engine, raw_q_model, raw_q_effort, allow_auto=False)
+                    eff_fast = int(raw_q_fast)
                 with db.transaction() as conn:
                     claimed = conn.execute(
                         "UPDATE session_queue SET status='dispatched', updated=? WHERE id=? AND status='pending'",
@@ -650,8 +716,8 @@ async def run(ident):
                     )
                     if claimed.rowcount:
                         conn.execute(
-                            'INSERT INTO jobs(id,session_id,request_id,prompt,status,started,model,effort,mode,fast,images) '
-                            'VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                            'INSERT INTO jobs(id,session_id,request_id,prompt,status,started,model,effort,mode,fast,images,engine) '
+                            'VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
                             (
                                 next_job_id,
                                 session['id'],
@@ -664,22 +730,27 @@ async def run(ident):
                                 eff_mode,
                                 eff_fast,
                                 nxt.get('images') or '[]',
+                                eff_engine,
                             ),
                         )
+                        q_ev_payload = {
+                            'text': nxt['prompt'],
+                            'engine': eff_engine,
+                            'model': eff_model,
+                            'effort': eff_effort,
+                            'mode': eff_mode,
+                            'queued': True,
+                        }
+                        if route_q:
+                            q_ev_payload['auto_routed'] = True
+                            q_ev_payload['route_reason'] = route_q.get('reason') or ''
                         conn.execute(
                             'INSERT INTO events(session_id,job_id,kind,payload,created) VALUES(?,?,?,?,?)',
                             (
                                 session['id'],
                                 next_job_id,
                                 'user',
-                                json.dumps({
-                                    'text': nxt['prompt'],
-                                    'engine': eff_sess.get('engine'),
-                                    'model': eff_model,
-                                    'effort': eff_effort,
-                                    'mode': eff_mode,
-                                    'queued': True,
-                                }, ensure_ascii=False),
+                                json.dumps(q_ev_payload, ensure_ascii=False),
                                 now_ts,
                             ),
                         )

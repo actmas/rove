@@ -186,15 +186,31 @@ def catalog():
     return result
 
 
-def resolve_model(engine, model, effort=None):
+def resolve_model(engine, model, effort=None, allow_auto: bool = False):
     """Return (model, effort) that is valid for ``engine``.
 
     A model id that belongs to another engine's catalog (e.g. a GPT model left on an Antigravity
     or custom agent session after a relay switch) is replaced by the engine default.
-    Unknown/custom ids are preserved.
+    Unknown/custom ids are preserved. When ``allow_auto`` is True, explicit ``'auto'`` preferences
+    for model or effort (or engine='auto') are preserved.
     """
+    if engine == 'auto':
+        if allow_auto:
+            return (model or 'auto'), (effort or 'auto')
+        engine = 'codex'
     own = engine_models(engine)['models']
     own_ids = {m.get('id') for m in own}
+    default = next((m for m in own if m.get('isDefault')), own[0] if own else None)
+    if model == 'auto':
+        if allow_auto:
+            next_effort = 'auto' if effort == 'auto' else effort
+            return 'auto', next_effort
+        if not default:
+            return None, ('medium' if effort == 'auto' else effort)
+        efforts = default.get('efforts') or []
+        next_effort = effort if (effort != 'auto' and effort in efforts) else (default.get('defaultEffort') or 'medium')
+        return default.get('id'), next_effort
+
     all_engines = ['codex', 'antigravity'] + list(agents.load_custom_agents().keys())
     other_ids = set()
     for other_eng in all_engines:
@@ -205,12 +221,18 @@ def resolve_model(engine, model, effort=None):
                 other_ids.add(m['id'])
     other_ids -= own_ids
     if model and (model in own_ids or model not in other_ids):
+        if effort == 'auto' and not allow_auto:
+            matched = next((m for m in own if m.get('id') == model), default)
+            fallback_eff = (matched or {}).get('defaultEffort') or 'medium'
+            return model, fallback_eff
         return model, effort
-    default = next((m for m in own if m.get('isDefault')), own[0] if own else None)
     if not default:
-        return None, effort
+        return None, ('medium' if (effort == 'auto' and not allow_auto) else effort)
     efforts = default.get('efforts') or []
-    next_effort = effort if effort in efforts else (default.get('defaultEffort') or effort)
+    if effort == 'auto' and allow_auto:
+        next_effort = 'auto'
+    else:
+        next_effort = effort if (effort != 'auto' and effort in efforts) else (default.get('defaultEffort') or effort)
     return default.get('id'), next_effort
 
 

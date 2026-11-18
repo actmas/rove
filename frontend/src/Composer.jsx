@@ -4,7 +4,7 @@ import {
   ShieldCheck, Zap, ImagePlus, AtSign, X, FileCode, Sparkles,
   Cloud, Laptop, ExternalLink, Info, Pause, Play, Pencil, Trash2, ListOrdered, Mic, MicOff,
 } from 'lucide-react';
-import {api, post, compressImageFile} from './api';
+import {api, post, compressImageFile, previewAutoSelect} from './api';
 
 export default function Composer({
   sessionId = 'new', initialExecutionTarget = 'local', initialCloudEnvironment = '',
@@ -192,16 +192,60 @@ export default function Composer({
       localStorage.setItem(`walking-workstation:target:${engine}`, nextTarget);
     } catch {}
   };
-  const models = catalog?.[engine]?.models || [];
-  const currentModel = models.find(m => m.id === model) || models.find(m => m.isDefault) || models[0];
-  const efforts = currentModel?.efforts || ['low', 'medium', 'high'];
+  const isAutoEngine = engine === 'auto';
+  const isAutoMode = !cloud && (isAutoEngine || model === 'auto' || effort === 'auto');
+  const models = isAutoEngine ? [] : (catalog?.[engine]?.models || []);
+  const currentModel = model === 'auto'
+    ? null
+    : (models.find(m => m.id === model) || models.find(m => m.isDefault) || models[0]);
+  const efforts = (isAutoEngine || model === 'auto')
+    ? ['low', 'medium', 'high', 'xhigh']
+    : (currentModel?.efforts || ['low', 'medium', 'high']);
   const effortMap = catalog?.efforts || {};
-  const modes = catalog?.modes?.[engine] || [
+  const modes = (!isAutoEngine && catalog?.modes?.[engine]) || [
     {id: 'standard', label: '标准审批'},
     {id: 'full', label: '完全访问'},
     {id: 'auto', label: '自动执行'},
     {id: 'plan', label: '只读规划'},
   ];
+
+  const [autoPreview, setAutoPreview] = useState(null);
+  const quotasPrimedRef = useRef(false);
+
+  useEffect(() => {
+    if (!isAutoMode) {
+      setAutoPreview(null);
+      return;
+    }
+    let cancelled = false;
+    const runPreview = async () => {
+      if (!quotasPrimedRef.current) {
+        quotasPrimedRef.current = true;
+        try { await api('quotas'); } catch {}
+      }
+      try {
+        const res = await previewAutoSelect({
+          prompt: prompt || '',
+          mode,
+          has_images: images.length > 0,
+          engine: engine || 'auto',
+          model: model || 'auto',
+          effort: effort || 'auto',
+          fast: Boolean(fast),
+        });
+        if (!cancelled && res && res.model) {
+          setAutoPreview(res);
+        }
+      } catch {
+        if (!cancelled) setAutoPreview(null);
+      }
+    };
+    const timer = setTimeout(runPreview, prompt ? 260 : 40);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [isAutoMode, prompt, mode, images.length, engine, model, effort, fast]);
 
   const adjustHeight = useCallback(el => {
     if (!el) return;
@@ -665,6 +709,24 @@ export default function Composer({
           onKeyDown={handleKeyDown}
         />
 
+        {isAutoMode && autoPreview && (
+          <div className={`auto-route-preview budget-${autoPreview.budget_state || 'normal'}`} title={autoPreview.reason}>
+            <Sparkles size={12} className="auto-route-icon"/>
+            <span className="auto-route-main">
+              拟选：{autoPreview.engine === 'antigravity' ? 'Antigravity' : autoPreview.engine === 'codex' ? 'Codex' : autoPreview.engine} · {autoPreview.model_name} · {autoPreview.effort_label}
+            </span>
+            {autoPreview.quota_summary && (
+              <span className="auto-route-quota">
+                {autoPreview.budget_state === 'expiring_abundant'
+                  ? `⚡ ${autoPreview.quota_summary}·即将刷新优先用`
+                  : autoPreview.budget_state === 'scarce'
+                    ? `🛡 ${autoPreview.quota_summary}·动态节流`
+                    : autoPreview.quota_summary}
+              </span>
+            )}
+          </div>
+        )}
+
         <div className="composer-toolbar">
           <div className="composer-selectors">
             {!sessionLocked ? (
@@ -695,15 +757,16 @@ export default function Composer({
 
             <label
               className={`pill-select engine-picker engine-pill-${engine}`}
-              title="切换 AI 编程引擎（自动跨引擎同步上下文记忆）"
+              title="切换 AI 编程引擎（支持「智能调度」按任务难度与7天刷新额度跨引擎自动选优）"
             >
-              <Sparkles size={14} className={engine === 'antigravity' ? 'tone-purple' : engine === 'codex' ? 'tone-green' : 'tone-blue'}/>
+              <Sparkles size={14} className={engine === 'auto' ? 'tone-amber' : engine === 'antigravity' ? 'tone-purple' : engine === 'codex' ? 'tone-green' : 'tone-blue'}/>
               <select
                 aria-label="AI 引擎"
                 value={engine}
                 onChange={e => onEngineChange(e.target.value)}
                 disabled={active || sending}
               >
+                <option value="auto">✨ 智能调度 (Auto)</option>
                 {engineOptions.map(ag => (
                   <option key={ag.id} value={ag.id}>
                     {ag.id === 'codex' ? 'Codex' : ag.id === 'antigravity' ? 'Antigravity' : (ag.name || ag.id)}
@@ -787,14 +850,15 @@ export default function Composer({
               </div>
             )}
             {!cloud && <>
-            <label className="pill-select model-picker" title={currentModel?.description || '选择模型'}>
+            <label className="pill-select model-picker" title={model === 'auto' ? '根据任务复杂度与7天刷新额度自动选模型' : (currentModel?.description || '选择模型')}>
               <Brain size={14}/>
               <select
                 aria-label="选择模型"
-                value={currentModel?.id || ''}
+                value={isAutoEngine || model === 'auto' ? 'auto' : (currentModel?.id || '')}
                 onChange={e => onModelChange(e.target.value)}
                 disabled={active || sending}
               >
+                <option value="auto">✨ 自动选模型 (Auto)</option>
                 {models.map(m => (
                   <option key={m.id} value={m.id}>{m.name}</option>
                 ))}
@@ -802,14 +866,15 @@ export default function Composer({
               <ChevronDown size={12}/>
             </label>
 
-            <label className="pill-select effort-picker" title={effortMap[effort]?.description || '调整思考与推理强度'}>
+            <label className="pill-select effort-picker" title={effort === 'auto' ? '根据任务难度与剩余额度动态调节思考深度' : (effortMap[effort]?.description || '调整思考与推理强度')}>
               <SlidersHorizontal size={14}/>
               <select
                 aria-label="思考强度"
-                value={efforts.includes(effort) ? effort : (currentModel?.defaultEffort || efforts[0])}
+                value={effort === 'auto' ? 'auto' : (efforts.includes(effort) ? effort : (currentModel?.defaultEffort || efforts[0]))}
                 onChange={e => onEffortChange(e.target.value)}
                 disabled={active || sending}
               >
+                <option value="auto">✨ 自动调强度 (Auto)</option>
                 {efforts.map(ef => (
                   <option key={ef} value={ef}>{effortMap[ef]?.label || ef}</option>
                 ))}

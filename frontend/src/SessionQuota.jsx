@@ -3,33 +3,46 @@ import {Zap} from 'lucide-react';
 import {api, post} from './api';
 
 export function selectQuota(data, engine, model) {
+  if (engine === 'auto') {
+    const out = [];
+    const codexW = data?.codex?.status === 'ready' ? data.codex.secondary : null;
+    if (Number.isFinite(codexW?.remaining_percent)) {
+      out.push({...codexW, name: 'Codex 周额度'});
+    }
+    const agyW = data?.antigravity?.status === 'ready' ? data.antigravity.gemini_4_argon?.weekly : null;
+    if (Number.isFinite(agyW?.remaining_percent)) {
+      out.push({...agyW, name: 'Argon 周额度'});
+    }
+    return out;
+  }
   const source = data?.[engine];
   if (source?.status !== 'ready') return [];
   if (engine === 'codex') {
     return [source.primary, source.secondary].filter(w => Number.isFinite(w?.remaining_percent));
   }
-  let entry = source.by_model_id?.[model] || source.models?.find(m => m.model_id === model);
-  if (!entry && model) {
-    const ml = model.toLowerCase();
+  const resolvedModel = model === 'auto' ? '' : model;
+  let entry = (resolvedModel && (source.by_model_id?.[resolvedModel] || source.models?.find(m => m.model_id === resolvedModel))) || null;
+  if (!entry && resolvedModel) {
+    const ml = resolvedModel.toLowerCase();
     if (ml.includes('argon')) entry = source.gemini_4_argon;
     else if (ml.includes('claude') || ml.includes('gpt')) entry = source.claude_gpt;
     else if (ml.includes('flash') || ml.includes('pro')) entry = source.general_flash;
   }
   if (!entry) {
-    entry = source.general_flash || source.gemini_4_argon || source.claude_gpt;
+    entry = source.gemini_4_argon || source.general_flash || source.claude_gpt;
   }
   if (!entry) return [];
   if (entry.rolling_5h && entry.weekly && Number.isFinite(entry.rolling_5h.remaining_percent) && Number.isFinite(entry.weekly.remaining_percent)) {
     return [entry.rolling_5h, entry.weekly];
   }
-  return Number.isFinite(entry?.remaining_percent) ? [{...entry, name: entry.base_name || model}] : [];
+  return Number.isFinite(entry?.remaining_percent) ? [{...entry, name: entry.base_name || resolvedModel || '周额度'}] : [];
 }
 
 export default function SessionQuota({engine, model, status, executionTarget}) {
   const [data, setData] = useState(null);
   const [failed, setFailed] = useState(false);
   const lastForceAtRef = useRef(0);
-  const supported = executionTarget !== 'cloud' && (engine === 'codex' || engine === 'antigravity');
+  const supported = executionTarget !== 'cloud' && (engine === 'codex' || engine === 'antigravity' || engine === 'auto');
 
   useEffect(() => {
     if (!supported) return;

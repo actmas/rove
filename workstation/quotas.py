@@ -13,11 +13,14 @@ from . import engines
 from . import store as db
 from .rpc import CodexRPC
 
+import json
+
 logger = logging.getLogger(__name__)
 
 _CACHE_LOCK = asyncio.Lock()
 _CACHE: dict[str, Any] = {}
 _CACHE_EXPIRY: float = 0.0
+_CACHE_DATA_DIR: str = ""
 _CACHE_TTL = 120.0  # seconds (extended to avoid frequent codex app-server child process spawns)
 
 
@@ -736,15 +739,42 @@ def _has_expired_window(payload: dict, now: float) -> bool:
     return False
 
 
+def _cache_file() -> Path:
+    return Path(db.DATA) / 'quotas_cache.json'
+
+
+def save_cached_quotas(payload: dict) -> None:
+    """Persist the latest quota snapshot in memory and on disk under db.DATA."""
+    global _CACHE, _CACHE_EXPIRY, _CACHE_DATA_DIR
+    if not isinstance(payload, dict):
+        return
+    finish_now = float(payload.get("updated_at") or time.time())
+    _CACHE = payload
+    _CACHE_DATA_DIR = str(db.DATA)
+    future_resets = [ts for ts in _collect_reset_timestamps(payload) if ts > finish_now]
+    next_expiry = finish_now + _CACHE_TTL
+    if future_resets:
+        next_expiry = min(next_expiry, float(min(future_resets)))
+    _CACHE_EXPIRY = next_expiry
+    try:
+        cache_path = _cache_file()
+        if cache_path.parent.is_dir():
+            db.write_private(cache_path, json.dumps(payload, ensure_ascii=False))
+    except Exception:
+        pass
+
+
 async def get_all_quotas(force: bool = False) -> dict:
-    global _CACHE, _CACHE_EXPIRY
+    global _CACHE, _CACHE_EXPIRY, _CACHE_DATA_DIR
     now = time.time()
-    if not force and _CACHE and now < _CACHE_EXPIRY and not _has_expired_window(_CACHE, now):
+    cur_dir = str(db.DATA)
+    if not force and _CACHE and _CACHE_DATA_DIR == cur_dir and now < _CACHE_EXPIRY and not _has_expired_window(_CACHE, now):
         return _CACHE
 
     async with _CACHE_LOCK:
         now = time.time()
-        if not force and _CACHE and now < _CACHE_EXPIRY and not _has_expired_window(_CACHE, now):
+        cur_dir = str(db.DATA)
+        if not force and _CACHE and _CACHE_DATA_DIR == cur_dir and now < _CACHE_EXPIRY and not _has_expired_window(_CACHE, now):
             return _CACHE
 
         codex_res, agy_res = await asyncio.gather(
@@ -767,15 +797,21 @@ async def get_all_quotas(force: bool = False) -> dict:
             "codex": codex_data,
             "antigravity": agy_data,
         }
-        _CACHE = payload
-        future_resets = [ts for ts in _collect_reset_timestamps(payload) if ts > finish_now]
-        next_expiry = finish_now + _CACHE_TTL
-        if future_resets:
-            next_expiry = min(next_expiry, float(min(future_resets)))
-        _CACHE_EXPIRY = next_expiry
+        save_cached_quotas(payload)
         return payload
 
 
 def get_cached_quotas() -> dict:
-    """Return the last cached quota snapshot without spawning external processes."""
-    return dict(_CACHE) if isinstance(_CACHE, dict) else {}
+    """Return the last cached quota snapshot (from memory or disk) without spawning external processes."""
+    cur_dir = str(db.DATA)
+    if isinstance(_CACHE, dict) and _CACHE and _CACHE_DATA_DIR == cur_dir:
+        return dict(_CACHE)
+    try:
+        cache_path = _cache_file()
+        if cache_path.is_file():
+            data = json.loads(cache_path.read_text(encoding='utf-8'))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}

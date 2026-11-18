@@ -256,20 +256,34 @@ export default function App() {
 
   const syncControlsFromSession = useCallback((s, catalog) => {
     if (!s) return;
-    setEngine(s.engine);
-    const engineModels = catalog?.[s.engine]?.models || [];
+    const eng = s.engine || 'codex';
+    setEngine(eng);
+    if (eng === 'auto') {
+      setModel(s.model || 'auto');
+      setEffort(s.effort || 'auto');
+      setMode(s.mode || 'standard');
+      setFast(Boolean(s.fast));
+      return;
+    }
+    const engineModels = catalog?.[eng]?.models || [];
     const otherModels = Object.entries(catalog || {})
-      .filter(([k, v]) => k !== s.engine && Array.isArray(v?.models))
+      .filter(([k, v]) => k !== eng && Array.isArray(v?.models))
       .flatMap(([, v]) => v.models);
     const fallbackModel = engineModels.find(m => m.isDefault) || engineModels[0];
     // A model id that only exists in another engine's catalog (stale relay state) must not be shown or sent.
     const foreignModel = Boolean(s.model)
+      && s.model !== 'auto'
       && !engineModels.some(m => m.id === s.model)
       && otherModels.some(m => m.id === s.model);
-    const resolvedModel = (foreignModel ? '' : s.model) || fallbackModel?.id || '';
+    const resolvedModel = s.model === 'auto'
+      ? 'auto'
+      : ((foreignModel ? '' : s.model) || fallbackModel?.id || '');
     const modelObj = engineModels.find(m => m.id === resolvedModel) || fallbackModel;
     setModel(resolvedModel);
-    setEffort((foreignModel ? '' : s.effort) || modelObj?.defaultEffort || 'medium');
+    const resolvedEffort = s.effort === 'auto'
+      ? 'auto'
+      : ((foreignModel ? '' : s.effort) || modelObj?.defaultEffort || 'medium');
+    setEffort(resolvedEffort);
     setMode(s.mode || 'standard');
     setFast(Boolean(s.fast));
   }, []);
@@ -643,11 +657,19 @@ export default function App() {
 
   function applyEngineDefaults(nextEngine) {
     setEngine(nextEngine);
+    if (nextEngine === 'auto') {
+      setModel('auto');
+      setEffort('auto');
+      setFast(false);
+      return;
+    }
     const list = catalog?.[nextEngine]?.models || [];
     const def = list.find(m => m.isDefault) || list[0];
-    if (def) {
+    if (model !== 'auto' && def) {
       setModel(def.id);
-      setEffort(def.defaultEffort || 'medium');
+      if (effort !== 'auto') {
+        setEffort(def.defaultEffort || 'medium');
+      }
       if (!def.supportsFast) setFast(false);
     }
     if (nextEngine !== 'codex') setFast(false);
@@ -702,13 +724,21 @@ export default function App() {
 
   function changeEngine(value) {
     applyEngineDefaults(value);
+    if (value === 'auto') {
+      if (selected) {
+        persistSessionPrefs({ engine: 'auto', model: 'auto', effort: 'auto', fast: false });
+      } else {
+        newTask();
+      }
+      return;
+    }
     const list = catalog?.[value]?.models || [];
     const def = list.find(m => m.isDefault) || list[0];
-    const nextModel = def?.id || model;
-    const nextEffort = def?.defaultEffort || 'medium';
+    const nextModel = model === 'auto' ? 'auto' : (def?.id || model);
+    const nextEffort = effort === 'auto' ? 'auto' : (def?.defaultEffort || 'medium');
     if (selected) {
       persistSessionPrefs({ engine: value, model: nextModel, effort: nextEffort });
-      if (events.length > 0) {
+      if (events.length > 0 && nextModel !== 'auto') {
         getHandoffPreview(selected, value, nextModel)
           .then(res => { if (res?.needed) setHandoffPreview(res); })
           .catch(() => {});
@@ -728,13 +758,18 @@ export default function App() {
 
   function handleModelChange(nextModel) {
     setModel(nextModel);
+    if (nextModel === 'auto') {
+      setFast(false);
+      persistSessionPrefs({model: 'auto', fast: false});
+      return;
+    }
     const activeEngine = engine || current?.engine || 'codex';
     const list = catalog?.[activeEngine]?.models || [];
     const found = list.find(m => m.id === nextModel);
     let nextEffort = effort;
     let nextFast = fast;
     if (found) {
-      if (activeEngine === 'antigravity' || !found.efforts?.includes(effort)) {
+      if (effort !== 'auto' && (activeEngine === 'antigravity' || !found.efforts?.includes(effort))) {
         nextEffort = found.defaultEffort || found.efforts?.[0] || 'medium';
       }
       if (!found.supportsFast) nextFast = false;
@@ -1139,7 +1174,9 @@ export default function App() {
 
   const activeEngine = engine || current?.engine || 'codex';
   const activeModels = catalog?.[activeEngine]?.models || [];
-  const activeModelName = activeModels.find(m => m.id === model)?.name || model;
+  const activeModelName = (activeEngine === 'auto' || model === 'auto')
+    ? '智能自动'
+    : (activeModels.find(m => m.id === model)?.name || model);
   const resumeCmd = current?.native_id
     ? `${current.engine === 'codex' ? 'codex resume' : 'agy --conversation'} ${current.native_id}`
     : '';
