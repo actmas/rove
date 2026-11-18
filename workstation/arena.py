@@ -17,6 +17,7 @@ def start_arena_run(
     engine_b: str,
     model_a: str = '',
     model_b: str = '',
+    mode: str = 'standard',
 ) -> Dict[str, Any]:
     """Create two worktree-isolated sessions and enqueue the same prompt on two engines."""
     clean_prompt = (prompt or '').strip()
@@ -41,7 +42,7 @@ def start_arena_run(
             conn.execute(
                 'INSERT INTO sessions(id,project_id,title,engine,model,effort,mode,fast,cwd,created,updated,thread_kind) '
                 'VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
-                (sid, project['id'], f'[对比 {tag} · {eng}] {title_prefix}', eng, mod or None, 'medium', 'auto', 0, project['path'], now, now, 'arena'),
+                (sid, project['id'], f'[对比 {tag} · {eng}] {title_prefix}', eng, mod or None, 'medium', mode, 0, project['path'], now, now, 'arena'),
             )
 
     sess_a = db.one('SELECT * FROM sessions WHERE id=?', (sess_a_id,))
@@ -57,7 +58,7 @@ def start_arena_run(
             conn.execute(
                 'INSERT INTO jobs(id,session_id,request_id,prompt,status,started,model,effort,mode,fast,engine) '
                 'VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-                (jid, sid, f'{arena_id}-{sid[:6]}', clean_prompt, 'queued', now, mod or None, 'medium', 'auto', 0, eng),
+                (jid, sid, f'{arena_id}-{sid[:6]}', clean_prompt, 'queued', now, mod or None, 'medium', mode, 0, eng),
             )
             conn.execute(
                 'INSERT INTO events(session_id,job_id,kind,payload,created) VALUES(?,?,?,?,?)',
@@ -165,7 +166,7 @@ def adopt_arena_winner(arena_id: str, winner_session_id: str) -> Dict[str, Any]:
     )
     if loser_sess:
         try:
-            worktree.cleanup_session_worktree(proj, loser_sess, force=True)
+            worktree.remove_session_worktree(proj, loser_sess, force=True)
         except Exception:
             pass
     db.execute(

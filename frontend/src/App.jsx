@@ -832,7 +832,10 @@ export default function App() {
 
   useEffect(() => {
     loadQueue();
-  }, [loadQueue, job?.id, job?.status]);
+    if (!selected) return;
+    const interval = setInterval(loadQueue, 5000);
+    return () => clearInterval(interval);
+  }, [loadQueue, job?.id, job?.status, selected]);
 
   async function handleEnqueue(text, steer = false) {
     if (!selected || !text) return;
@@ -911,10 +914,14 @@ export default function App() {
     try {
       let res = await revertJobCheckpoint(selected, jobId, false);
       if (res?.requires_confirm) {
-        if (!window.confirm(res.message || '检测到后续改动或并发会话占用，确认强制回滚吗？')) {
+        if (!window.confirm(res.message || '检测到后续改动或并发会话占用，回滚将永久清除后续对话历史并覆盖工作区改动，确认强制回滚吗？')) {
           return;
         }
         res = await revertJobCheckpoint(selected, jobId, true);
+      } else {
+        if (!window.confirm('回滚将使工作区代码还原到该轮执行前，并永久清除该轮之后的记录，确认继续吗？')) {
+          return;
+        }
       }
       const snap = await api(`sessions/${selected}/snapshot`);
       setHistoryPage(snap);

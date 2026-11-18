@@ -1,20 +1,20 @@
 /* Walking Workstation Service Worker: Instant App-Shell Boot, WebAPK, Offline Fallback & Web Push */
-const CACHE_NAME = 'walking-workstation-shell-2648ef6865';
+const CACHE_NAME = 'walking-workstation-shell-af852cd325';
 const PRECACHE_ASSETS = [
   "/",
   "/manifest.webmanifest",
   "/rove-favicon.svg",
   "/rove-apple-touch.png",
   "/rove-192.png",
-  "/watch/assets/InstallGuideModal-DXM_GKaf.js",
+  "/watch/assets/InstallGuideModal-D6jMjev9.js",
   "/watch/assets/PermissionModal-B5Cc98pz.js",
-  "/watch/assets/PreviewPane-BR4GbMFK.js",
-  "/watch/assets/ProjectMemoriesModal-BORl3tdM.js",
-  "/watch/assets/QuotaModal-CUZOPwpv.js",
-  "/watch/assets/SettingsPanel-BUgjLVTO.js",
-  "/watch/assets/WorktreeModal-wj4Dq1P7.js",
+  "/watch/assets/PreviewPane-IFcGhq6c.js",
+  "/watch/assets/ProjectMemoriesModal-whN36XEa.js",
+  "/watch/assets/QuotaModal-Nfdg4Ti6.js",
+  "/watch/assets/SettingsPanel-D4VndLIM.js",
+  "/watch/assets/WorktreeModal-DSIJf6l5.js",
   "/watch/assets/index-CYwkr7ql.css",
-  "/watch/assets/index-RgzSUHu5.js",
+  "/watch/assets/index-CmSjiyUD.js",
   "/watch/assets/vendor-icons-CQ2Ibl1H.js",
   "/watch/assets/vendor-markdown-D6awl5rF.js",
   "/watch/assets/vendor-react-BCaoD2OB.js"
@@ -180,7 +180,7 @@ self.addEventListener('activate', event => {
     const keys = await caches.keys();
     await Promise.all(
       keys
-        .filter(k => (k.startsWith('walking-workstation-') || k === 'walking-workstation-shell-2648ef6865') && k !== CACHE_NAME)
+        .filter(k => (k.startsWith('walking-workstation-') || k === 'walking-workstation-shell-af852cd325') && k !== CACHE_NAME)
         .map(k => caches.delete(k)),
     );
     await self.clients.claim();

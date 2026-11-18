@@ -46,6 +46,23 @@ def checkpoint_ref_name(session_id: str, job_id: str, phase: str = 'before') -> 
     return f'refs/rove/checkpoints/{session_id}/{job_id}{suffix}'
 
 
+def delete_session_checkpoints(workdir: str, session_id: str) -> int:
+    """Delete all hidden checkpoint refs for a session to prevent Git object bloat."""
+    if not _is_git_repo_with_head(workdir) or not SAFE_ID_RE.match(session_id):
+        return 0
+    prefix = f'refs/rove/checkpoints/{session_id}/'
+    res = _git(['for-each-ref', '--format=%(refname)', prefix], workdir, check=False)
+    if res.returncode != 0 or not res.stdout.strip():
+        return 0
+    refs = [line.strip() for line in res.stdout.splitlines() if line.strip().startswith(prefix)]
+    deleted = 0
+    for r in refs:
+        del_res = _git(['update-ref', '-d', r], workdir, check=False)
+        if del_res.returncode == 0:
+            deleted += 1
+    return deleted
+
+
 def capture_checkpoint(workdir: str, session_id: str, job_id: str, phase: str = 'before') -> str:
     """Snapshot working tree (tracked + untracked) into a hidden Git ref without altering HEAD or index."""
     if not _is_git_repo_with_head(workdir):
@@ -149,7 +166,7 @@ def _check_revert_conflicts(workdir: str, session_id: str, job: Dict[str, Any]) 
     active_rows = db.query(
         "SELECT j.id AS job_id, j.session_id, s.title, s.project_id, s.use_worktree, s.worktree_path "
         "FROM jobs j JOIN sessions s ON s.id=j.session_id "
-        "WHERE j.session_id!=? AND j.status IN ('queued','running','waiting_approval','waiting_question')",
+        "WHERE j.session_id!=? AND j.status IN ('queued','running','waiting')",
         (session_id,),
     )
     norm_workdir = str(Path(workdir).resolve())
@@ -192,7 +209,7 @@ def revert_to_checkpoint(workdir: str, session_id: str, job_id: str, force: bool
                 'requires_confirm': True,
                 'later_jobs_count': conflicts['later_jobs_count'],
                 'other_active_sessions': conflicts['other_active_sessions'],
-                'message': '检测到回滚冲突：' + '；'.join(reasons) + '。确认后将覆盖后续改动。',
+                'message': '检测到回滚冲突：' + '；'.join(reasons) + '。回滚将永久清除后续回合的对话历史并覆盖工作区改动，确认继续吗？',
             }
 
     # Restore working tree from checkpoint_ref via temporary index, keeping HEAD untouched.

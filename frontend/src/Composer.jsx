@@ -96,8 +96,24 @@ export default function Composer({
   // Isolate draft text and image state locally if not controlled by parent
   const [internalPrompt, setInternalPrompt] = useState(() => {
     try {
-      const saved = localStorage.getItem(draftStorageKey) || sessionStorage.getItem(draftStorageKey);
-      if (saved) return saved;
+      const raw = localStorage.getItem(draftStorageKey) || sessionStorage.getItem(draftStorageKey);
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed === 'object' && parsed.text !== undefined) {
+            // Expire after 7 days (7 * 86400 * 1000 ms)
+            if (Date.now() - (parsed.time || 0) < 7 * 86400 * 1000) {
+              return parsed.text;
+            } else {
+              localStorage.removeItem(draftStorageKey);
+              sessionStorage.removeItem(draftStorageKey);
+              return initialPrompt;
+            }
+          }
+        } catch {
+          return raw;
+        }
+      }
     } catch {}
     return initialPrompt;
   });
@@ -112,8 +128,22 @@ export default function Composer({
   useEffect(() => {
     if (propPrompt !== undefined) return;
     try {
-      const saved = localStorage.getItem(draftStorageKey) || '';
-      setInternalPrompt(saved || initialPrompt);
+      const raw = localStorage.getItem(draftStorageKey) || '';
+      let text = raw;
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed === 'object' && parsed.text !== undefined) {
+            if (Date.now() - (parsed.time || 0) < 7 * 86400 * 1000) {
+              text = parsed.text;
+            } else {
+              text = '';
+              localStorage.removeItem(draftStorageKey);
+            }
+          }
+        } catch {}
+      }
+      setInternalPrompt(text || initialPrompt);
       const savedAtt = localStorage.getItem(draftAttachKey);
       setTextAttachments(savedAtt ? JSON.parse(savedAtt) : []);
     } catch {}
@@ -123,7 +153,7 @@ export default function Composer({
     if (propPrompt !== undefined) return;
     try {
       if (internalPrompt) {
-        localStorage.setItem(draftStorageKey, internalPrompt);
+        localStorage.setItem(draftStorageKey, JSON.stringify({text: internalPrompt, time: Date.now()}));
       } else {
         localStorage.removeItem(draftStorageKey);
       }

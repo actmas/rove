@@ -123,6 +123,7 @@ export default function PreviewPane({onError}) {
             key={`${numericPort}-${cleanSub}-${nonce}`}
             src={iframeSrc}
             title={`Local Dev Preview :${numericPort}`}
+            sandbox="allow-scripts allow-forms allow-modals allow-popups"
             className={`preview-iframe ${viewport === 'mobile' ? 'is-mobile' : ''}`}
           />
         ) : (

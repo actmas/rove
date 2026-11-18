@@ -121,6 +121,48 @@ class GithubInspiredFeaturesTests(unittest.TestCase):
         bad_port = self.get('preview/22')
         self.assertEqual(bad_port.status_code, 400)
 
+    def test_5_queue_pause_resume_respects_waiting_job(self):
+        proj = self.post('projects', {'path': str(self.project)}).json()
+        sess = self.post('sessions', {'project_id': proj['id'], 'engine': 'codex'}).json()
+
+        # Add a queued message
+        self.post(f"sessions/{sess['id']}/queue", {'text': 'future task'})
+
+        # Simulate job waiting for approval
+        jid = secrets.token_hex(12)
+        db.execute(
+            "INSERT INTO jobs(id,session_id,request_id,prompt,status,started,engine) VALUES(?,?,?,?,'waiting',?,'codex')",
+            (jid, sess['id'], secrets.token_hex(8), 'needs approval', 1000.0),
+        )
+
+        # Pause queue then resume
+        self.post(f"sessions/{sess['id']}/queue/pause", {'paused': True})
+        res = self.post(f"sessions/{sess['id']}/queue/pause", {'paused': False})
+        self.assertEqual(res.status_code, 200)
+        # Because job is 'waiting', it should NOT dispatch another job and crash with 500
+        self.assertIsNone(res.json()['dispatched_job_id'])
+
+    def test_6_session_deletion_cleans_checkpoints(self):
+        proj = self.post('projects', {'path': str(self.project)}).json()
+        sess = self.post('sessions', {'project_id': proj['id'], 'engine': 'codex'}).json()
+        jid = secrets.token_hex(12)
+
+        from workstation import checkpoints
+        ref = checkpoints.capture_checkpoint(str(self.project), sess['id'], jid)
+        self.assertTrue(ref.startswith('refs/rove/checkpoints/'))
+
+        # Check ref exists
+        res = subprocess.run(['git', 'rev-parse', '--verify', ref], cwd=str(self.project), capture_output=True)
+        self.assertEqual(res.returncode, 0)
+
+        # Delete session
+        del_res = self.client.delete(f"/api/sessions/{sess['id']}", headers=self.headers)
+        self.assertEqual(del_res.status_code, 200)
+
+        # Verify checkpoint ref was deleted
+        res2 = subprocess.run(['git', 'rev-parse', '--verify', ref], cwd=str(self.project), capture_output=True)
+        self.assertNotEqual(res2.returncode, 0)
+
     def test_4_arena_dual_worktree_and_adopt_winner(self):
         proj = self.post('projects', {'path': str(self.project)}).json()
         # Mock spawn so test doesn't spawn detached OS subprocesses
@@ -146,9 +188,19 @@ class GithubInspiredFeaturesTests(unittest.TestCase):
             self.assertEqual(status['status'], 'ready')
             self.assertGreater(status['candidate_a']['diff']['additions'], 0)
 
+            sess_b = db.one('SELECT * FROM sessions WHERE id=?', (arena_data['session_b_id'],))
+            wt_b_path = Path(sess_b['worktree_path'])
+            self.assertTrue(wt_b_path.exists())
+
             adopt = self.post(f"arena/{arena_data['id']}/adopt", {'winner_session_id': arena_data['session_a_id']})
             self.assertEqual(adopt.status_code, 200, adopt.text)
             self.assertTrue((self.project / 'feature_a.py').is_file())
+
+            # Verify loser worktree was cleaned up
+            self.assertFalse(wt_b_path.exists())
+            sess_b_after = db.one('SELECT * FROM sessions WHERE id=?', (arena_data['session_b_id'],))
+            self.assertIsNone(sess_b_after['worktree_path'])
+            self.assertEqual(sess_b_after['use_worktree'], 0)
         finally:
             server.spawn = orig_spawn
 

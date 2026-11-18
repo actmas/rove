@@ -406,6 +406,16 @@ def prune_sessions(cutoff_timestamp: float, dry_run: bool = False, keep_pinned: 
         conn.execute(f"DELETE FROM sessions WHERE id IN ({placeholders})", target_sids)
         conn.commit()
 
+        # Clean up git checkpoint refs for pruned sessions
+        from . import checkpoints
+        for sid in target_sids:
+            with contextlib.suppress(Exception):
+                sess_row = db.one('SELECT * FROM sessions WHERE id=?', (sid,))
+                proj_row = db.one('SELECT * FROM projects WHERE id=?', (sess_row.get('project_id'),)) if sess_row else None
+                if sess_row and proj_row:
+                    workdir = db.session_workdir(sess_row, proj_row)
+                    checkpoints.delete_session_checkpoints(workdir, sid)
+
         return {
             'dry_run': False,
             'pruned_sessions': len(target_sids),

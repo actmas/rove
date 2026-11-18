@@ -231,7 +231,7 @@ async def security(request: Request, call_next):
     if path.startswith('/api/preview/'):
         response.headers['X-Frame-Options'] = 'SAMEORIGIN'
         response.headers['X-Content-Type-Options'] = 'nosniff'
-        response.headers['Content-Security-Policy'] = "frame-ancestors 'self'"
+        response.headers['Content-Security-Policy'] = "frame-ancestors 'self'; sandbox allow-scripts allow-forms allow-modals allow-popups"
         return response
     if (path.startswith('/assets/') or path.startswith('/watch/assets/')) and response.status_code == 200:
         cache_control = 'public, max-age=31536000, immutable'
@@ -393,7 +393,7 @@ async def proxy_local_preview(port: int, request: Request, subpath: str = ''):
     headers = {}
     for k, v in upstream.headers.items():
         kl = k.lower()
-        if kl in ('content-encoding', 'content-length', 'transfer-encoding', 'x-frame-options', 'content-security-policy'):
+        if kl in ('content-encoding', 'content-length', 'transfer-encoding', 'x-frame-options', 'content-security-policy', 'set-cookie'):
             continue
         headers[k] = v
     return Response(content=upstream.content, status_code=upstream.status_code, headers=headers)
@@ -1023,6 +1023,11 @@ async def delete_session(ident: str):
                 'INSERT OR REPLACE INTO dismissed_antigravity_threads(native_id,dismissed_at) VALUES(?,?)',
                 (agy_nid, time.time()),
             )
+    with contextlib.suppress(Exception):
+        p = db.one('SELECT * FROM projects WHERE id=?', (current.get('project_id'),))
+        if p:
+            workdir = db.session_workdir(current, p)
+            checkpoints.delete_session_checkpoints(workdir, ident)
     upload_dir = (db.DATA / 'uploads' / ident).resolve()
     if upload_dir.is_relative_to((db.DATA / 'uploads').resolve()):
         shutil.rmtree(upload_dir, ignore_errors=True)
@@ -1963,7 +1968,7 @@ async def pause_or_resume_session_queue(ident: str, body: QueuePauseBody):
     dispatched_job_id = None
     if not body.paused:
         active = db.one(
-            "SELECT 1 FROM jobs WHERE session_id=? AND status IN ('queued','running','waiting_approval','waiting_question') LIMIT 1",
+            "SELECT 1 FROM jobs WHERE session_id=? AND status IN ('queued','running','waiting') LIMIT 1",
             (ident,),
         )
         if not active:
@@ -2016,7 +2021,7 @@ async def workstation_diagnostics():
     pending_rows = db.query(
         "SELECT a.id, j.session_id, a.job_id, a.method, a.payload, a.created, s.title AS session_title "
         "FROM approvals a JOIN jobs j ON j.id=a.job_id JOIN sessions s ON s.id=j.session_id "
-        "WHERE a.decision IS NULL ORDER BY a.created DESC LIMIT 50"
+        "WHERE a.decision IS NULL AND j.status='waiting' ORDER BY a.created DESC LIMIT 50"
     )
     approvals = []
     questions = []
@@ -2836,8 +2841,11 @@ async def write_project_file(ident: str, body: WriteFileBody):
 
 
 def git_run(path, *args):
-    result = subprocess.run(['git', '-c', 'core.quotepath=false', '-C', path, *args], capture_output=True, timeout=15)
-    return result.returncode, result.stdout[:2 * 1024 * 1024].decode(errors='replace')
+    try:
+        result = subprocess.run(['git', '-c', 'core.quotepath=false', '-C', path, *args], capture_output=True, timeout=15)
+        return result.returncode, result.stdout[:2 * 1024 * 1024].decode(errors='replace')
+    except subprocess.TimeoutExpired:
+        return 124, 'Git 命令执行超时'
 
 
 @app.get('/api/projects/{ident}/diff')
@@ -2895,11 +2903,14 @@ async def git_push(ident: str, body: GitPushBody | None = None):
     p = project(ident)
     req = body or GitPushBody()
     workdir = str(_project_base(p, req.session_id))
-    proc = await asyncio.to_thread(
-        subprocess.run,
-        ['git', '-C', workdir, 'push'],
-        capture_output=True, text=True, timeout=30,
-    )
+    try:
+        proc = await asyncio.to_thread(
+            subprocess.run,
+            ['git', '-C', workdir, 'push'],
+            capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(504, 'git push 网络超时，请检查远端网络与凭据')
     if proc.returncode != 0:
         raise HTTPException(409, (proc.stderr or proc.stdout or 'git push 失败')[:1000])
     return {'ok': True, 'output': (proc.stdout or proc.stderr or '已推送至远端').strip()}
@@ -2955,18 +2966,24 @@ async def git_create_pr(ident: str, body: GitPrBody | None = None):
     branch = br_out.strip() if rc_br == 0 else ''
     if not branch or branch in ('main', 'master', 'HEAD'):
         raise HTTPException(409, f'当前分支为 {branch or "HEAD"}，请先在 Worktree 或特性分支上提交后再创建 PR')
-    push_proc = await asyncio.to_thread(
-        subprocess.run, ['git', '-C', workdir, 'push', '-u', 'origin', branch],
-        capture_output=True, text=True, timeout=30,
-    )
+    try:
+        push_proc = await asyncio.to_thread(
+            subprocess.run, ['git', '-C', workdir, 'push', '-u', 'origin', branch],
+            capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(504, 'git push 分支超时')
     if push_proc.returncode != 0:
         raise HTTPException(409, (push_proc.stderr or push_proc.stdout or '推送分支失败')[:800])
     title = req.title.strip() or f'feat: {branch}'
     pr_body = req.body.strip() or f'Created from Rove workstation branch `{branch}`.'
-    pr_proc = await asyncio.to_thread(
-        subprocess.run, ['gh', 'pr', 'create', '--title', title, '--body', pr_body],
-        cwd=workdir, capture_output=True, text=True, timeout=30,
-    )
+    try:
+        pr_proc = await asyncio.to_thread(
+            subprocess.run, ['gh', 'pr', 'create', '--title', title, '--body', pr_body],
+            cwd=workdir, capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(504, 'gh pr create 请求超时')
     if pr_proc.returncode != 0:
         raise HTTPException(409, (pr_proc.stderr or pr_proc.stdout or 'gh pr create 失败')[:800])
     return {'ok': True, 'url': pr_proc.stdout.strip()}
@@ -2979,6 +2996,7 @@ class ArenaStartBody(BaseModel):
     engine_b: str = 'antigravity'
     model_a: str = ''
     model_b: str = ''
+    mode: str = 'standard'
 
 
 class ArenaAdoptBody(BaseModel):
@@ -2990,7 +3008,7 @@ async def api_arena_start(body: ArenaStartBody):
     p = project(body.project_id)
     try:
         res = await asyncio.to_thread(
-            arena.start_arena_run, p, body.prompt, body.engine_a, body.engine_b, body.model_a, body.model_b
+            arena.start_arena_run, p, body.prompt, body.engine_a, body.engine_b, body.model_a, body.model_b, body.mode
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
