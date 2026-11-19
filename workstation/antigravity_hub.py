@@ -426,6 +426,53 @@ async def probe_hub_roundtrip(hub: AntigravityHubClient) -> dict:
             pass
 
 
+async def quick_classify_text(hub: AntigravityHubClient, instruction: str, timeout: float = 2.5) -> str:
+    """Run a fast, ephemeral single-turn text classification via Hub Flash/Hydrogen and clean up."""
+    configs = await asyncio.wait_for(hub.get_model_configs(), timeout=1.0)
+    preferred_id = 'gemini-3.8-flash-low'
+    available_ids = {c.get('modelId') for c in configs if c.get('modelId') and not c.get('disabled')}
+    if preferred_id not in available_ids:
+        preferred_id = 'gemini-4-hydrogen-low' if 'gemini-4-hydrogen-low' in available_ids else next(iter(available_ids), 'gemini-3.8-flash-low')
+    plan_model = resolve_plan_model(preferred_id, 'low', configs)
+
+    cid = str(uuid.uuid4())
+    folder = (db.DATA / 'diagnostics').resolve()
+    folder.mkdir(exist_ok=True, mode=0o700)
+    started = await asyncio.wait_for(hub.call('StartCascade', {
+        'cascadeId': cid,
+        'source': 'CORTEX_TRAJECTORY_SOURCE_CASCADE_CLIENT',
+        'workspaceUris': [folder.as_uri()],
+    }, timeout=1.2), timeout=1.2)
+    cid = started.get('cascadeId') or cid
+
+    try:
+        await asyncio.wait_for(hub.call('SendUserCascadeMessage', {
+            'cascadeId': cid,
+            'items': [{'text': instruction}],
+            'cascadeConfig': build_cascade_config(plan_model, 'plan'),
+            'customAgentSpec': _default_agent_spec(),
+        }, timeout=1.2), timeout=1.2)
+
+        deadline = time.monotonic() + max(0.8, timeout)
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.18)
+            steps = (await asyncio.wait_for(
+                hub.call('GetCascadeTrajectorySteps', {'cascadeId': cid, 'stepOffset': 0}, timeout=1.0),
+                timeout=1.0,
+            )).get('steps') or []
+            for st in steps:
+                if st.get('type') == 'CORTEX_STEP_TYPE_ERROR_MESSAGE':
+                    return ''
+                pr = st.get('plannerResponse') or {}
+                txt = (pr.get('modifiedResponse') or pr.get('response') or '').strip()
+                if txt and st.get('status') == 'CORTEX_STEP_STATUS_DONE':
+                    return txt
+        return ''
+    finally:
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(hub.call('DeleteCascadeTrajectory', {'cascadeId': cid}, timeout=1.5), timeout=1.5)
+
+
 def _uri_to_path(uri_or_path: str) -> str:
     if not uri_or_path:
         return ''

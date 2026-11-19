@@ -1199,6 +1199,8 @@ async def _resolve_auto_params(
     req_fast: bool,
     preferred_engine: str | None = None,
     allow_quota_fetch: bool = False,
+    session_id: str | None = None,
+    use_semantic: bool = False,
 ) -> tuple[str, str | None, str | None, int, dict | None]:
     """Resolve 'auto' engine/model/effort preferences into concrete execution choices."""
     needs_auto = (req_engine == 'auto' or req_model == 'auto' or req_effort == 'auto')
@@ -1211,6 +1213,23 @@ async def _resolve_auto_params(
     if allow_quota_fetch and not q_snap:
         with contextlib.suppress(Exception):
             q_snap = await asyncio.wait_for(quotas.get_all_quotas(force=False), timeout=2.5)
+
+    recent_turns = None
+    if session_id:
+        with contextlib.suppress(Exception):
+            recent_turns = await asyncio.to_thread(context_bridge.extract_session_turns, session_id)
+            if recent_turns:
+                recent_turns = recent_turns[-2:]
+
+    task_override = None
+    if use_semantic:
+        with contextlib.suppress(Exception):
+            task_override = await model_router.classify_task_semantic(
+                prompt=prompt_text,
+                mode=mode,
+                has_images=has_images,
+                recent_turns=recent_turns,
+            )
 
     installed: list[str] | None = None
     if req_engine == 'auto':
@@ -1232,6 +1251,8 @@ async def _resolve_auto_params(
         quotas_snapshot=q_snap,
         installed_engines=installed,
         preferred_engine=preferred_engine,
+        recent_turns=recent_turns,
+        task_override=task_override,
     )
     chosen_engine = route_info['engine']
     chosen_model, chosen_effort = engines.resolve_model(
@@ -1308,6 +1329,8 @@ async def send_message(ident: str, body: Prompt):
             req_fast=req_fast,
             preferred_engine=pref_engine,
             allow_quota_fetch=True,
+            session_id=ident,
+            use_semantic=True,
         )
 
     if not agents.is_agent_installed(chosen_engine):

@@ -10,9 +10,17 @@ Capabilities:
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import hashlib
+import json
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
+
+
+_SEMANTIC_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_SEMANTIC_TTL = 60.0
 
 
 _EFFORT_ORDER = ('low', 'medium', 'high', 'xhigh', 'max', 'ultra')
@@ -62,10 +70,17 @@ def _effective_text_length(text: str) -> int:
     return len(text) + int(cjk * 1.2)
 
 
+_FOLLOWUP_HINTS = (
+    '继续', '接着', '然后呢', '再看', '为什么', '不对', '还是', '报错', '改一下', '修一下',
+    'continue', 'why', 'still', 'again', 'fix it', 'next',
+)
+
+
 def classify_task(
     prompt: str = '',
     mode: str = 'standard',
     has_images: bool = False,
+    recent_turns: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Classify task complexity and baseline desired tier / effort."""
     text = (prompt or '').strip()
@@ -99,6 +114,23 @@ def classify_task(
             'reason_label': '只读规划/架构分析' if is_plan else '复杂开发/重构排查',
         }
 
+    # Continuity guard: short follow-up inside an ongoing high-effort/complex thread shouldn't drop to 'simple'
+    prev_was_heavy = False
+    if recent_turns:
+        last_turn = recent_turns[-1] or {}
+        last_eff = str(last_turn.get('effort') or '').lower()
+        last_model = str(last_turn.get('model') or '').lower()
+        if last_eff in ('high', 'xhigh', 'max', 'ultra') or any(k in last_model for k in ('argon', 'astra', 'opus')):
+            prev_was_heavy = True
+
+    if prev_was_heavy and eff_len <= 60 and any(h in lower for h in _FOLLOWUP_HINTS):
+        return {
+            'complexity': 'standard',
+            'desired_tier': 'balanced',
+            'base_effort': 'medium',
+            'reason_label': '延续前序复杂任务追问',
+        }
+
     if (
         not is_plan
         and not has_images
@@ -124,6 +156,93 @@ def classify_task(
     }
 
 
+def _parse_semantic_verdict(raw_text: str) -> Optional[Dict[str, Any]]:
+    if not raw_text:
+        return None
+    m = re.search(r'\{[\s\S]*\}', raw_text)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(0))
+    except Exception:
+        return None
+    comp = str(data.get('complexity') or '').lower().strip()
+    if comp not in ('simple', 'standard', 'complex'):
+        return None
+    eff = str(data.get('effort') or '').lower().strip()
+    tier_map = {'simple': 'fast', 'standard': 'balanced', 'complex': 'flagship'}
+    default_eff = {'simple': 'low', 'standard': 'medium', 'complex': 'high'}
+    if eff not in ('low', 'medium', 'high', 'xhigh'):
+        eff = default_eff[comp]
+    reason = str(data.get('reason') or '').strip()[:60]
+    default_lbl = {'simple': '语义识别: 轻量任务', 'standard': '语义识别: 常规开发', 'complex': '语义识别: 复杂/深度任务'}
+    return {
+        'complexity': comp,
+        'desired_tier': tier_map[comp],
+        'base_effort': eff,
+        'reason_label': reason or default_lbl[comp],
+        'semantic': True,
+    }
+
+
+async def classify_task_semantic(
+    prompt: str = '',
+    mode: str = 'standard',
+    has_images: bool = False,
+    recent_turns: Optional[List[Dict[str, Any]]] = None,
+    timeout: float = 2.4,
+) -> Dict[str, Any]:
+    """Use a fast LLM (local Antigravity Hub Flash/Hydrogen) to classify task difficulty with strict timeout fallback."""
+    baseline = classify_task(prompt=prompt, mode=mode, has_images=has_images, recent_turns=recent_turns)
+    text = (prompt or '').strip()
+    if not text:
+        return baseline
+
+    ctx_lines = []
+    for t in (recent_turns or [])[-2:]:
+        u = str(t.get('user') or '').strip().replace('\n', ' ')[:120]
+        if u:
+            ctx_lines.append(f"- 前序提问: {u}")
+    ctx_block = '\n'.join(ctx_lines) if ctx_lines else '(无前序对话)'
+    cache_key = hashlib.sha256(f"{mode}|{int(has_images)}|{ctx_block}|{text[:800]}".encode('utf-8')).hexdigest()
+
+    now = time.monotonic()
+    cached = _SEMANTIC_CACHE.get(cache_key)
+    if cached and (now - cached[0]) < _SEMANTIC_TTL:
+        return dict(cached[1])
+
+    instruction = (
+        "你是编程任务难度路由分类器。请根据当前指令和最近上下文，判断任务复杂度与所需思考强度，"
+        "严格仅输出一行 JSON，不要输出任何多余文字：\n"
+        '{"complexity":"simple|standard|complex","effort":"low|medium|high|xhigh","reason":"15字内中文理由"}\n'
+        "判定标准：\n"
+        "- simple (low): 寒暄、概念问答、简单命令/解释、微调文案或单行改名\n"
+        "- standard (medium): 常规功能实现、单模块修 bug、写测试、页面样式调整\n"
+        "- complex (high/xhigh): 架构设计、多文件重构、疑难并发/安全排查、全局审计、复杂只读规划\n"
+        f"执行模式: {mode} | 含图片: {'是' if has_images else '否'}\n"
+        f"最近上下文:\n{ctx_block}\n"
+        f"当前指令:\n{text[:900]}"
+    )
+
+    try:
+        from . import antigravity_hub
+        hub = await asyncio.wait_for(antigravity_hub.discover_hub(auto_launch=False), timeout=0.8)
+        if hub is not None:
+            raw = await asyncio.wait_for(
+                antigravity_hub.quick_classify_text(hub, instruction, timeout=max(1.0, timeout - 0.3)),
+                timeout=timeout,
+            )
+            parsed = _parse_semantic_verdict(raw)
+            if parsed:
+                if len(_SEMANTIC_CACHE) > 256:
+                    _SEMANTIC_CACHE.clear()
+                _SEMANTIC_CACHE[cache_key] = (now, parsed)
+                return dict(parsed)
+    except Exception:
+        pass
+    return baseline
+
+
 def _classify_model_tier(engine: str, model_spec: Dict[str, Any]) -> str:
     mid = str(model_spec.get('id') or model_spec.get('model') or '').lower()
     # Check flagship families before general/fast tokens (and use token boundaries so 'gemini' != 'mini')
@@ -136,7 +255,7 @@ def _classify_model_tier(engine: str, model_spec: Dict[str, Any]) -> str:
         return 'balanced'
     if any(tok in mid for tok in ('flash', 'luna')) or re.search(r'(?:^|[-_.])(mini|nano|haiku|light)(?:$|[-_.])', mid):
         return 'fast'
-    if any(tok in mid for tok in ('sonnet', 'sol', 'terra', 'gpt-oss')) or re.search(r'(?:^|[-_.])pro(?:$|[-_.])', mid):
+    if any(tok in mid for tok in ('neon', 'sonnet', 'sol', 'terra', 'gpt-oss')) or re.search(r'(?:^|[-_.])pro(?:$|[-_.])', mid):
         return 'balanced'
     if model_spec.get('defaultEffort') in ('high', 'xhigh', 'max', 'ultra'):
         return 'flagship'
@@ -166,7 +285,7 @@ def _pick_agy_pool(agy: Dict[str, Any], model_id: str) -> Dict[str, Any]:
         fallback_card = agy['gemini_4_argon']
     elif ('claude' in mid_l or 'gpt' in mid_l) and isinstance(agy.get('claude_gpt'), dict):
         fallback_card = agy['claude_gpt']
-    elif any(k in mid_l for k in ('hydrogen', 'flash', 'pro')) and isinstance(agy.get('general_flash'), dict):
+    elif any(k in mid_l for k in ('hydrogen', 'neon', 'flash', 'pro')) and isinstance(agy.get('general_flash'), dict):
         fallback_card = agy['general_flash']
 
     if mid and isinstance(by_mid.get(mid), dict):
@@ -564,13 +683,17 @@ def auto_select_model_and_effort(
     catalog: Optional[Dict[str, Any]] = None,
     installed_engines: Optional[List[str]] = None,
     preferred_engine: Optional[str] = None,
+    recent_turns: Optional[List[Dict[str, Any]]] = None,
+    task_override: Optional[Dict[str, Any]] = None,
     now: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Select optimal concrete (engine, model, effort, fast) based on task & dynamic 7-day quota."""
     from . import agents, engines
 
     cat = catalog if isinstance(catalog, dict) else engines.catalog()
-    task_info = classify_task(prompt=prompt, mode=mode, has_images=has_images)
+    task_info = task_override if isinstance(task_override, dict) else classify_task(
+        prompt=prompt, mode=mode, has_images=has_images, recent_turns=recent_turns
+    )
 
     auto_engine = (requested_engine == 'auto' or not requested_engine)
     auto_model = (requested_model == 'auto' or not requested_model)

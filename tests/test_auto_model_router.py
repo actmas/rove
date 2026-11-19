@@ -346,6 +346,36 @@ class AutoModelRouterTests(unittest.TestCase):
         self.assertEqual(cmp_res['model'], 'gemini-4-argon-high')
         self.assertIn(cmp_res['effort'], ('high', 'xhigh'))
 
+    def test_6_semantic_router_context_continuity_and_neon_tier(self):
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from workstation import antigravity_hub
+
+        # Context continuity prevents short follow-ups in heavy threads from dropping to 'simple'
+        cont = model_router.classify_task(
+            '继续',
+            recent_turns=[{'user': '全面审计并发问题', 'model': 'gemini-4-argon-high', 'effort': 'high'}],
+        )
+        self.assertEqual(cont['complexity'], 'standard')
+        self.assertEqual(cont['base_effort'], 'medium')
+
+        # Gemini 4 Neon & GPT-6.2 tier classification
+        self.assertEqual(model_router._classify_model_tier('antigravity', {'id': 'gemini-4-neon-medium'}), 'balanced')
+        self.assertEqual(model_router._classify_model_tier('codex', {'id': 'gpt-6.2-astra'}), 'flagship')
+
+        # Semantic router parses fast Hub response and falls back cleanly on error
+        fake_hub = object()
+        with patch.object(antigravity_hub, 'discover_hub', new=AsyncMock(return_value=fake_hub)), \
+             patch.object(antigravity_hub, 'quick_classify_text', new=AsyncMock(return_value='{"complexity":"complex","effort":"high","reason":"隐蔽并发死锁"}')):
+            verdict = asyncio.run(model_router.classify_task_semantic('帮我看下这段逻辑有没有坑'))
+        self.assertEqual(verdict['complexity'], 'complex')
+        self.assertEqual(verdict['base_effort'], 'high')
+        self.assertTrue(verdict.get('semantic'))
+
+        with patch.object(antigravity_hub, 'discover_hub', new=AsyncMock(side_effect=TimeoutError('timeout'))):
+            fb = asyncio.run(model_router.classify_task_semantic('你好，解释一下这是什么意思'))
+        self.assertEqual(fb['complexity'], 'simple')
+
 
 if __name__ == '__main__':
     unittest.main()
