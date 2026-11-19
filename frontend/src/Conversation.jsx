@@ -1367,6 +1367,17 @@ export default function Conversation({
     />
   );
 
+  const sessionModels = useMemo(() => {
+    const counts = new Map();
+    for (const item of content) {
+      if (item.role !== 'user' || !item.model) continue;
+      const effEngine = item.engine || session?.engine || 'codex';
+      const name = catalog?.[effEngine]?.models?.find(x => x.id === item.model)?.name || item.model;
+      counts.set(name, (counts.get(name) || 0) + 1);
+    }
+    return Array.from(counts.entries()).map(([name, count]) => ({name, count}));
+  }, [content, catalog, session?.engine]);
+
   if (content.length === 0 && !externalActive) {
     return (
       <div className="conversation empty-conversation">
@@ -1410,6 +1421,8 @@ export default function Conversation({
   const contextPct = tokenUsage?.contextWindow
     ? Math.min(100, Math.round(((tokenUsage.lastTokens || tokenUsage.totalTokens) / tokenUsage.contextWindow) * 100))
     : null;
+
+
 
   const activeScrubTurn = scrubState.active && scrubState.index != null ? turns[scrubState.index] : null;
   const highlightedIdx = scrubState.active && scrubState.index != null ? scrubState.index : visibleTurnIdx;
@@ -1577,6 +1590,17 @@ export default function Conversation({
               </span>
             )}
             <SessionQuota executionTarget={session?.execution_target} engine={localActive ? runningJobEngine : engine} model={localActive ? job?.model : activeModelObj?.id} status={job?.status} />
+            {sessionModels.length > 0 && (
+              <span className="token-chip model-summary-chip" title="本会话已调用的模型及次数">
+                <Bot size={12}/>
+                {sessionModels.map((m, idx) => (
+                  <span key={m.name} className={`model-summary-item ${localActive && runningJobModelName === m.name ? 'is-running' : ''}`}>
+                    {idx > 0 && <span className="model-summary-sep">·</span>}
+                    {m.name}{m.count > 1 ? ` ×${m.count}` : ''}
+                  </span>
+                ))}
+              </span>
+            )}
           </div>
         )}
 

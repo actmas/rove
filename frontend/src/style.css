@@ -2824,6 +2824,20 @@ pre {
   gap: 6px;
 }
 
+.token-chip.model-summary-chip {
+  color: var(--fg);
+}
+
+.model-summary-item.is-running {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.model-summary-sep {
+  margin: 0 4px;
+  color: var(--muted);
+}
+
 .context-bar {
   width: 44px;
   height: 4px;

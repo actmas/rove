@@ -1095,9 +1095,9 @@ export default function Composer({
               {listening ? <MicOff size={16}/> : <Mic size={16}/>}
             </button>
 
-            {active ? (
+            {(active || externalActive) ? (
               <div className="active-send-controls">
-                {onEnqueue && prompt.trim() && (
+                {active && onEnqueue && prompt.trim() && (
                   <>
                     <button
                       type="button"
@@ -1128,8 +1128,8 @@ export default function Composer({
                 <button
                   type="button"
                   className="send-button stop-button"
-                  aria-label="停止任务"
-                  title="停止当前任务"
+                  aria-label={externalActive && !active ? '停止外部任务并解锁' : '停止任务'}
+                  title={externalActive && !active ? '停止本机运行中任务并解锁输入' : '停止当前任务'}
                   onClick={onStop}
                 >
                   <Square size={13} fill="currentColor"/>

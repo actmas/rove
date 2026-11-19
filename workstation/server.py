@@ -1764,12 +1764,19 @@ async def stop(ident: str):
                 pid = j.get('pid')
                 if pid and pid != os.getpid():
                     with contextlib.suppress(OSError):
+                        os.killpg(pid, signal.SIGTERM)
+                    with contextlib.suppress(OSError):
                         os.kill(pid, signal.SIGTERM)
             db.execute(
                 "UPDATE jobs SET status='stopped', ended=COALESCE(ended, ?), error=COALESCE(error, '已强制终止后台任务进程') "
                 "WHERE session_id=? AND status IN ('queued','running','waiting')",
                 (time.time(), ident),
             )
+
+    with contextlib.suppress(Exception):
+        for r in orchestration_store.list_session_orchestration_runs(ident):
+            if r.get('status') in ('queued', 'running', 'waiting'):
+                await orchestrator.stop_run(r['id'])
 
     cascade_id = db.get_antigravity_native_id(s)
     if cascade_id:
@@ -1780,7 +1787,7 @@ async def stop(ident: str):
         await asyncio.to_thread(antigravity_sync.mark_external_stopped, ident, cascade_id)
 
     codex_id = db.get_codex_native_id(s)
-    if codex_id and not active_jobs:
+    if codex_id:
         await asyncio.to_thread(codex_sync.mark_external_stopped, ident, codex_id, s.get('rollout_path'))
 
     return {'ok': True}

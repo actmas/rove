@@ -578,6 +578,15 @@ async def run(ident):
         (outcome['status'], outcome['error'], time.time(), after_ckpt, ident),
     )
     db.execute('UPDATE sessions SET updated=?, last_engine=? WHERE id=?', (time.time(), active_engine, session['id']))
+    if outcome['status'] == 'stopped':
+        with contextlib.suppress(Exception):
+            fresh_s = db.one('SELECT * FROM sessions WHERE id=?', (session['id'],)) or session
+            agy_nid = db.get_antigravity_native_id(fresh_s)
+            if agy_nid:
+                antigravity_sync.mark_external_stopped(session['id'], agy_nid)
+            codex_nid = db.get_codex_native_id(fresh_s)
+            if codex_nid:
+                codex_sync.mark_external_stopped(session['id'], codex_nid, fresh_s.get('rollout_path'))
     db.event(session['id'], ident, 'job_status', outcome)
     if outcome['status'] == 'completed' and job.get('execution_target') != 'cloud':
         with contextlib.suppress(Exception):

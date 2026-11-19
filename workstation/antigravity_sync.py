@@ -345,13 +345,21 @@ def live_antigravity_states(sessions_list: list[dict], active_local_session_ids:
     if not summaries_db.is_file():
         return {}
 
-    active_markers: dict[str, str] = {}
+    now = time.time()
+    active_markers: dict[str, tuple[str, float]] = {}
     with contextlib.suppress(sqlite3.Error, OSError):
         with contextlib.closing(_ro_connect(summaries_db)) as conn:
             for r in conn.execute(
                 'SELECT conversation_id, step_count, last_modified_time FROM conversation_summaries WHERE not_fully_idle = 1'
             ):
-                active_markers[r['conversation_id']] = f"{r['step_count']}:{r['last_modified_time']}"
+                cid = r['conversation_id']
+                marker = f"{r['step_count']}:{r['last_modified_time']}"
+                mod_ts = _parse_time_to_ts(r['last_modified_time'])
+                t_path = home / 'brain' / cid / '.system_generated' / 'logs' / 'transcript.jsonl'
+                with contextlib.suppress(OSError):
+                    if t_path.is_file():
+                        mod_ts = max(mod_ts, t_path.stat().st_mtime)
+                active_markers[cid] = (marker, mod_ts)
 
     res = {}
     for s in sessions_list:
@@ -359,9 +367,25 @@ def live_antigravity_states(sessions_list: list[dict], active_local_session_ids:
         if not nid:
             continue
         sid = s['id']
-        marker = active_markers.get(nid)
+        info = active_markers.get(nid)
+        if not info or sid in active_local_session_ids:
+            res[sid] = {'external_active': False, 'writer_locked': False}
+            continue
+        marker, latest_ts = info
         stopped_marker = (s.get('external_stopped_marker') or '').strip()
-        is_active = bool(marker) and sid not in active_local_session_ids and stopped_marker != marker
+        stopped_at = float(s.get('external_stopped_at') or 0.0)
+        if stopped_marker == marker:
+            is_active = False
+        elif stopped_at > 0 and (latest_ts <= stopped_at + 20.0 or (now - stopped_at) <= 20.0):
+            # Post-cancel cleanup steps written shortly after Stop must not re-lock the session
+            is_active = False
+            with contextlib.suppress(Exception):
+                db.execute('UPDATE sessions SET external_stopped_marker=? WHERE id=?', (marker, sid))
+        elif (now - latest_ts) > 180.0:
+            # Stale not_fully_idle flag (e.g. background daemon or aborted turn with no activity for >3m)
+            is_active = False
+        else:
+            is_active = True
         res[sid] = {'external_active': is_active, 'writer_locked': is_active}
     return res
 
